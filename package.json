@@ -1,0 +1,21 @@
+{
+  "name": "everform-middleware",
+  "version": "1.0.0",
+  "description": "Shopify ↔ Square middleware for Everform Life",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "db:migrate": "node src/db/migrate.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "pg": "^8.12.0",
+    "square": "^37.1.1",
+    "@shopify/shopify-api": "^11.4.1",
+    "dotenv": "^16.4.5"
+  }
+}
