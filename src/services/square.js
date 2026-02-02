@@ -132,7 +132,14 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
             reminders: [],
           },
         ],
-        deliveryMethod: 'SMS',
+        acceptedPaymentMethods: {
+          card: true,
+          bankAccount: false,
+          squareGiftCard: false,
+          buyNowPayLater: false,
+          cashAppPay: false,
+        },
+        deliveryMethod: 'EMAIL',
         title: `Order #${shopifyOrderNumber}`,
         customFields: [
           {
