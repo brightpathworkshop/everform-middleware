@@ -31,6 +31,9 @@ app.use(squareWebhook);
 app.listen(config.port, async () => {
   console.log(`[Server] Everform middleware running on port ${config.port}`);
   console.log(`[Server] Square environment: ${config.square.environment}`);
+  console.log(`[Server] Shopify Client ID set: ${!!config.shopify.clientId}`);
+  console.log(`[Server] Shopify Client Secret set: ${!!config.shopify.clientSecret}`);
+  console.log(`[Server] Shopify Admin Token set: ${!!config.shopify.adminApiToken}`);
 
   // Run migrations
   try {
