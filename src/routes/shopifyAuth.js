@@ -10,21 +10,20 @@ const SCOPES = 'read_orders,write_orders,read_customers';
 // Shopify redirects here when the merchant clicks "Install"
 // We redirect them to the Shopify OAuth authorization screen
 router.get('/', (req, res) => {
-  const { shop, hmac, timestamp } = req.query;
+  const { shop } = req.query;
 
   if (!shop) {
     return res.status(400).send('Missing shop parameter');
   }
 
-  // Verify the request is from Shopify
-  if (hmac) {
-    const params = { ...req.query };
-    delete params.hmac;
-    const sorted = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
-    const digest = crypto.createHmac('sha256', config.shopify.clientSecret).update(sorted).digest('hex');
-    if (digest !== hmac) {
-      return res.status(401).send('Invalid HMAC');
-    }
+  if (!config.shopify.clientId || !config.shopify.clientSecret) {
+    console.error('[Shopify Auth] SHOPIFY_CLIENT_ID or SHOPIFY_CLIENT_SECRET not set');
+    return res.status(500).send('App not configured: missing Shopify OAuth credentials');
+  }
+
+  // Validate shop parameter format
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9-]*\.myshopify\.com$/.test(shop)) {
+    return res.status(400).send('Invalid shop parameter');
   }
 
   const nonce = crypto.randomBytes(16).toString('hex');
