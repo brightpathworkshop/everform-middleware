@@ -6,13 +6,19 @@ const { alertMerchant } = require('../services/alerts');
 
 const router = express.Router();
 
-router.post('/webhooks/square/payment', async (req, res) => {
+router.post('/webhooks/square', async (req, res) => {
   // 1. Verify webhook signature
   const signature = req.headers['x-square-hmacsha256-signature'];
-  const notificationUrl = `${req.protocol}://${req.get('host')}${req.originalUrl}`;
+  // Use https explicitly — Railway terminates TLS at the proxy
+  const notificationUrl = `https://${req.get('host')}${req.originalUrl}`;
+
+  console.log(`[Square Webhook] Received request at ${notificationUrl}`);
+  console.log(`[Square Webhook] Signature present: ${!!signature}`);
+  console.log(`[Square Webhook] Signature key configured: ${!!require('../config').square.webhookSignatureKey}`);
 
   if (!signature || !square.verifyWebhookSignature(req.rawBody, signature, notificationUrl)) {
     console.warn('[Square Webhook] Invalid signature — rejected');
+    console.warn(`[Square Webhook] URL used for verification: ${notificationUrl}`);
     return res.status(401).send('Invalid signature');
   }
 
