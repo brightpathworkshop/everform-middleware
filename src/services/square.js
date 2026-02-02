@@ -157,6 +157,12 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
     return publishResult.result.invoice;
   } catch (err) {
     console.error('[Square] Invoice creation failed:', err.message);
+    if (err.errors) {
+      console.error('[Square] Error details:', JSON.stringify(err.errors, null, 2));
+    }
+    if (err.body) {
+      console.error('[Square] Response body:', err.body);
+    }
     throw err;
   }
 }
