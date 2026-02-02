@@ -7,6 +7,8 @@ module.exports = {
     storeUrl: process.env.SHOPIFY_STORE_URL,
     adminApiToken: process.env.SHOPIFY_ADMIN_API_TOKEN,
     webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET,
+    clientId: process.env.SHOPIFY_CLIENT_ID,
+    clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
   },
 
   square: {

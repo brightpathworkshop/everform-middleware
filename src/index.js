@@ -1,6 +1,7 @@
 const express = require('express');
 const config = require('./config');
 const rawBodyMiddleware = require('./middleware/rawBody');
+const shopifyAuth = require('./routes/shopifyAuth');
 const shopifyWebhook = require('./routes/shopifyWebhook');
 const squareWebhook = require('./routes/squareWebhook');
 const pool = require('./db/pool');
@@ -18,6 +19,9 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
+
+// Shopify OAuth install flow
+app.use('/auth', shopifyAuth);
 
 // Webhook routes
 app.use(shopifyWebhook);
