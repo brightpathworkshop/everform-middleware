@@ -1,10 +1,11 @@
 const crypto = require('crypto');
 const config = require('../config');
 
-const BASE_URL = `https://${config.shopify.storeUrl}/admin/api/2024-10`;
+const REST_URL = `https://${config.shopify.storeUrl}/admin/api/2024-10`;
+const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2024-10/graphql.json`;
 
 async function shopifyFetch(endpoint, options = {}) {
-  const url = `${BASE_URL}${endpoint}`;
+  const url = `${REST_URL}${endpoint}`;
   const res = await fetch(url, {
     ...options,
     headers: {
@@ -23,31 +24,57 @@ async function shopifyFetch(endpoint, options = {}) {
   return res.json();
 }
 
+async function shopifyGraphQL(query, variables = {}) {
+  const res = await fetch(GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Shopify-Access-Token': config.shopify.adminApiToken,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Shopify GraphQL ${res.status}: ${body}`);
+  }
+
+  const data = await res.json();
+  if (data.errors) {
+    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(data.errors)}`);
+  }
+  return data;
+}
+
 // --- Mark Order as Paid ---
 
 async function markOrderAsPaid(shopifyOrderId, { squareInvoiceId, squarePaymentId }) {
-  const transactionNote = squareInvoiceId
-    ? `Payment received via invoice #${squareInvoiceId}`
-    : `Payment received via auto-charge #${squarePaymentId}`;
+  const gid = `gid://shopify/Order/${shopifyOrderId}`;
 
-  // Create a transaction to mark the order as paid
-  const data = await shopifyFetch(`/orders/${shopifyOrderId}/transactions.json`, {
-    method: 'POST',
-    body: JSON.stringify({
-      transaction: {
-        kind: 'capture',
-        status: 'success',
-        gateway: 'manual',
-      },
-    }),
-  });
+  const result = await shopifyGraphQL(
+    `mutation orderMarkAsPaid($input: OrderMarkAsPaidInput!) {
+      orderMarkAsPaid(input: $input) {
+        order { id name }
+        userErrors { field message }
+      }
+    }`,
+    { input: { id: gid } }
+  );
 
-  console.log(`[Shopify] Marked order ${shopifyOrderId} as paid`);
+  const { order, userErrors } = result.data.orderMarkAsPaid;
+  if (userErrors && userErrors.length > 0) {
+    throw new Error(`Shopify orderMarkAsPaid failed: ${JSON.stringify(userErrors)}`);
+  }
+
+  console.log(`[Shopify] Marked order ${shopifyOrderId} (${order.name}) as paid`);
 
   // Add note to the order
-  await addOrderNote(shopifyOrderId, transactionNote);
+  const note = squareInvoiceId
+    ? `Payment received via Square invoice #${squareInvoiceId}`
+    : `Payment received via Square auto-charge #${squarePaymentId}`;
+  await addOrderNote(shopifyOrderId, note);
 
-  return data;
+  return order;
 }
 
 // --- Add Order Note ---
