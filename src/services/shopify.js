@@ -26,7 +26,17 @@ async function shopifyFetch(endpoint, options = {}) {
 
 async function shopifyGraphQL(query, variables = {}) {
   console.log(`[Shopify] GraphQL URL: ${GRAPHQL_URL}`);
-  console.log(`[Shopify] Token set: ${!!config.shopify.adminApiToken}`);
+  console.log(`[Shopify] Token prefix: ${config.shopify.adminApiToken?.substring(0, 10)}...`);
+
+  // Diagnostic: try a simple REST GET first to check token validity
+  try {
+    const testRes = await fetch(`${REST_URL}/shop.json`, {
+      headers: { 'X-Shopify-Access-Token': config.shopify.adminApiToken },
+    });
+    console.log(`[Shopify] REST test (GET /shop.json): ${testRes.status}`);
+  } catch (e) {
+    console.log(`[Shopify] REST test failed: ${e.message}`);
+  }
 
   const res = await fetch(GRAPHQL_URL, {
     method: 'POST',
@@ -36,6 +46,9 @@ async function shopifyGraphQL(query, variables = {}) {
     },
     body: JSON.stringify({ query, variables }),
   });
+
+  console.log(`[Shopify] GraphQL response status: ${res.status}`);
+  console.log(`[Shopify] GraphQL response headers:`, JSON.stringify(Object.fromEntries(res.headers)));
 
   if (!res.ok) {
     const body = await res.text();
