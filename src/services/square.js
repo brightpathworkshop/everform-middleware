@@ -141,13 +141,6 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
         },
         deliveryMethod: 'EMAIL',
         title: `Order #${shopifyOrderNumber}`,
-        customFields: [
-          {
-            label: 'Order Reference',
-            value: shopifyOrderNumber,
-            placement: 'ABOVE_LINE_ITEMS',
-          },
-        ],
       },
     });
 
