@@ -25,6 +25,9 @@ async function shopifyFetch(endpoint, options = {}) {
 }
 
 async function shopifyGraphQL(query, variables = {}) {
+  console.log(`[Shopify] GraphQL URL: ${GRAPHQL_URL}`);
+  console.log(`[Shopify] Token set: ${!!config.shopify.adminApiToken}`);
+
   const res = await fetch(GRAPHQL_URL, {
     method: 'POST',
     headers: {
