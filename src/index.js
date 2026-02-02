@@ -23,9 +23,12 @@ app.get('/health', (req, res) => {
 app.use(shopifyWebhook);
 app.use(squareWebhook);
 
-// Run migration on startup, then start server
-async function start() {
-  // Run migrations inline (create tables if not exist)
+// Start server first (so healthcheck passes), then run migrations
+app.listen(config.port, async () => {
+  console.log(`[Server] Everform middleware running on port ${config.port}`);
+  console.log(`[Server] Square environment: ${config.square.environment}`);
+
+  // Run migrations
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS customers (
@@ -55,13 +58,6 @@ async function start() {
     console.log('[DB] Tables ready');
   } catch (err) {
     console.error('[DB] Migration failed:', err.message);
-    process.exit(1);
+    console.error('[DB] Webhooks will not work until database is connected.');
   }
-
-  app.listen(config.port, () => {
-    console.log(`[Server] Everform middleware running on port ${config.port}`);
-    console.log(`[Server] Square environment: ${config.square.environment}`);
-  });
-}
-
-start();
+});
