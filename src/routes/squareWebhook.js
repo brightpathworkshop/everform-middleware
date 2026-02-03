@@ -12,13 +12,8 @@ router.post('/webhooks/square', async (req, res) => {
   // Use https explicitly — Railway terminates TLS at the proxy
   const notificationUrl = `https://${req.get('host')}${req.originalUrl}`;
 
-  console.log(`[Square Webhook] Received request at ${notificationUrl}`);
-  console.log(`[Square Webhook] Signature present: ${!!signature}`);
-  console.log(`[Square Webhook] Signature key configured: ${!!require('../config').square.webhookSignatureKey}`);
-
   if (!signature || !square.verifyWebhookSignature(req.rawBody, signature, notificationUrl)) {
     console.warn('[Square Webhook] Invalid signature — rejected');
-    console.warn(`[Square Webhook] URL used for verification: ${notificationUrl}`);
     return res.status(401).send('Invalid signature');
   }
 
