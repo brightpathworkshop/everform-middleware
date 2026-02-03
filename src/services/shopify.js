@@ -1,8 +1,8 @@
 const crypto = require('crypto');
 const config = require('../config');
 
-const REST_URL = `https://${config.shopify.storeUrl}/admin/api/2025-04`;
-const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2025-04/graphql.json`;
+const REST_URL = `https://${config.shopify.storeUrl}/admin/api/2026-01`;
+const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2026-01/graphql.json`;
 
 async function shopifyFetch(endpoint, options = {}) {
   const url = `${REST_URL}${endpoint}`;
