@@ -116,16 +116,15 @@ function parseOrderPayload(payload) {
     0
   );
 
-  const lineItemsTotal = (payload.line_items || []).reduce(
-    (sum, item) => sum + parseFloat(item.price || 0) * item.quantity,
-    0
-  );
+  // Use total_discounts which includes ALL discount types:
+  // - discount codes entered by customer
+  // - automatic discounts
+  // - manual discounts applied in admin
+  const discountTotal = parseFloat(payload.total_discounts || 0);
 
-  // Use discount_codes to calculate discount amount
-  const discountTotal = (payload.discount_codes || []).reduce(
-    (sum, d) => sum + parseFloat(d.amount || 0),
-    0
-  );
+  // Calculate subtotal as total minus shipping (accounts for all discounts)
+  const total = parseFloat(payload.total_price || 0);
+  const subtotal = total - shippingTotal;
 
   return {
     shopifyOrderId: String(payload.id),
@@ -135,9 +134,9 @@ function parseOrderPayload(payload) {
     firstName: payload.customer?.first_name || '',
     lastName: payload.customer?.last_name || '',
     phone: payload.shipping_address?.phone || payload.customer?.phone || '',
-    subtotal: lineItemsTotal - discountTotal,
+    subtotal,
     shipping: shippingTotal,
-    total: parseFloat(payload.total_price || 0),
+    total,
   };
 }
 
