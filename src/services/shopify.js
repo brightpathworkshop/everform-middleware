@@ -111,19 +111,17 @@ function verifyWebhookSignature(body, hmacHeader) {
 // --- Parse Order Data ---
 
 function parseOrderPayload(payload) {
-  const shippingTotal = (payload.shipping_lines || []).reduce(
-    (sum, line) => sum + parseFloat(line.price || 0),
-    0
+  // Get the ACTUAL shipping cost after any shipping discounts (e.g., free shipping codes)
+  // total_shipping_price_set contains the final shipping amount the customer pays
+  const shippingTotal = parseFloat(
+    payload.total_shipping_price_set?.shop_money?.amount || 0
   );
 
-  // Use total_discounts which includes ALL discount types:
-  // - discount codes entered by customer
-  // - automatic discounts
-  // - manual discounts applied in admin
-  const discountTotal = parseFloat(payload.total_discounts || 0);
-
-  // Calculate subtotal as total minus shipping (accounts for all discounts)
+  // Total is what the customer actually pays
   const total = parseFloat(payload.total_price || 0);
+
+  // Subtotal is total minus actual shipping
+  // This ensures product cost + shipping = total (no double-counting discounts)
   const subtotal = total - shippingTotal;
 
   return {
