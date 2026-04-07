@@ -138,9 +138,34 @@ function parseOrderPayload(payload) {
   };
 }
 
+// --- Generate Account Activation URL ---
+
+async function generateAccountActivationUrl(shopifyCustomerId) {
+  const gid = `gid://shopify/Customer/${shopifyCustomerId}`;
+
+  const result = await shopifyGraphQL(
+    `mutation customerGenerateAccountActivationUrl($customerId: ID!) {
+      customerGenerateAccountActivationUrl(customerId: $customerId) {
+        accountActivationUrl
+        userErrors { field message }
+      }
+    }`,
+    { customerId: gid }
+  );
+
+  const { accountActivationUrl, userErrors } = result.data.customerGenerateAccountActivationUrl;
+  if (userErrors && userErrors.length > 0) {
+    throw new Error(`Shopify activation URL failed: ${JSON.stringify(userErrors)}`);
+  }
+
+  console.log(`[Shopify] Generated activation URL for customer ${shopifyCustomerId}`);
+  return accountActivationUrl;
+}
+
 module.exports = {
   markOrderAsPaid,
   addOrderNote,
   verifyWebhookSignature,
   parseOrderPayload,
+  generateAccountActivationUrl,
 };

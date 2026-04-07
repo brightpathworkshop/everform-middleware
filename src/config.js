@@ -23,6 +23,14 @@ module.exports = {
     url: process.env.DATABASE_URL,
   },
 
+  ghl: {
+    apiKey: process.env.GHL_API_KEY,
+    locationId: process.env.GHL_LOCATION_ID,
+    fieldIds: {
+      accountSetupUrl: 'JmSEHfP1wYYUtwiwWoNG',
+    },
+  },
+
   merchant: {
     alertEmail: process.env.MERCHANT_ALERT_EMAIL,
     alertPhone: process.env.MERCHANT_ALERT_PHONE,

@@ -3,6 +3,7 @@ const config = require('./config');
 const rawBodyMiddleware = require('./middleware/rawBody');
 const shopifyAuth = require('./routes/shopifyAuth');
 const shopifyWebhook = require('./routes/shopifyWebhook');
+const shopifyCustomerWebhook = require('./routes/shopifyCustomerWebhook');
 const squareWebhook = require('./routes/squareWebhook');
 const pool = require('./db/pool');
 
@@ -25,6 +26,7 @@ app.use('/auth', shopifyAuth);
 
 // Webhook routes
 app.use(shopifyWebhook);
+app.use(shopifyCustomerWebhook);
 app.use(squareWebhook);
 
 // Start server first (so healthcheck passes), then run migrations
@@ -34,6 +36,7 @@ app.listen(config.port, async () => {
   console.log(`[Server] Shopify Client ID set: ${!!config.shopify.clientId}`);
   console.log(`[Server] Shopify Client Secret set: ${!!config.shopify.clientSecret}`);
   console.log(`[Server] Shopify Admin Token set: ${!!config.shopify.adminApiToken}`);
+  console.log(`[Server] GHL API Key set: ${!!config.ghl.apiKey}`);
 
   // Run migrations
   try {
