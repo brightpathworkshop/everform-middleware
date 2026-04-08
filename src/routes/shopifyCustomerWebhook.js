@@ -24,9 +24,11 @@ router.post('/webhooks/shopify/customers', async (req, res) => {
   console.log(`[Customer Webhook] Customer ${customerId} (${email}) — state: ${state}`);
 
   try {
-    // Only generate activation URL for customers who haven't activated yet
-    if (state !== 'disabled') {
-      console.log(`[Customer Webhook] Customer ${customerId} already activated — skipping`);
+    // Only generate activation URL for customers who haven't activated yet.
+    // "disabled" = never invited, "invited" = invite sent but not yet accepted.
+    // Both are valid states for customerGenerateAccountActivationUrl.
+    if (state !== 'disabled' && state !== 'invited') {
+      console.log(`[Customer Webhook] Customer ${customerId} already activated (state: ${state}) — skipping`);
       return;
     }
 
