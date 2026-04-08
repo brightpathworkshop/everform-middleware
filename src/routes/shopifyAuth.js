@@ -5,7 +5,7 @@ const pool = require('../db/pool');
 
 const router = express.Router();
 
-const SCOPES = 'read_orders,write_orders,read_customers';
+const SCOPES = 'read_orders,write_orders,read_customers,write_customers';
 
 // Shopify redirects here when the merchant clicks "Install"
 // We redirect them to the Shopify OAuth authorization screen
