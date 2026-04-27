@@ -52,31 +52,15 @@ router.post('/webhooks/square', async (req, res) => {
       // Update order status
       await db.orders.updatePayment(order.shopify_order_id, paymentId);
 
-      // Update customer card-on-file status (they just paid, so card is likely saved)
-      const recipientId = invoiceData.primary_recipient?.customer_id;
-      if (recipientId) {
-        await db.customers.updateCardOnFile(recipientId, true);
-      }
-
-      // Mark Shopify order as paid
+      // Mark Shopify order as paid (shopifyGraphQL retries transient errors internally)
       try {
-        await shopify.markOrderAsPaid(order.shopify_order_id, {
-          squareInvoiceId,
-        });
+        await shopify.markOrderAsPaid(order.shopify_order_id, { squareInvoiceId });
         console.log(`[Square Webhook] Order #${order.shopify_order_number} marked as paid in Shopify`);
       } catch (err) {
-        console.error(`[Square Webhook] Shopify update failed, retrying...`);
-        // Retry once
-        try {
-          await shopify.markOrderAsPaid(order.shopify_order_id, {
-            squareInvoiceId,
-          });
-        } catch (retryErr) {
-          alertMerchant(
-            'Shopify update failed after payment',
-            `Order #${order.shopify_order_number} invoice ${squareInvoiceId} paid but Shopify not updated: ${retryErr.message}`
-          );
-        }
+        alertMerchant(
+          'Shopify update failed after payment',
+          `Order #${order.shopify_order_number} invoice ${squareInvoiceId} paid but Shopify not updated after retries: ${err.message}`
+        );
       }
     }
   } catch (err) {

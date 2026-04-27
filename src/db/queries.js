@@ -17,24 +17,17 @@ const customers = {
     return rows[0] || null;
   },
 
-  async create({ shopifyCustomerId, squareCustomerId, email, hasCardOnFile }) {
+  async create({ shopifyCustomerId, squareCustomerId, email }) {
     const { rows } = await pool.query(
-      `INSERT INTO customers (shopify_customer_id, square_customer_id, email, has_card_on_file)
-       VALUES ($1, $2, $3, $4)
+      `INSERT INTO customers (shopify_customer_id, square_customer_id, email)
+       VALUES ($1, $2, $3)
        ON CONFLICT (shopify_customer_id) DO UPDATE SET
          square_customer_id = EXCLUDED.square_customer_id,
          email = EXCLUDED.email
        RETURNING *`,
-      [shopifyCustomerId, squareCustomerId, email.toLowerCase(), hasCardOnFile || false]
+      [shopifyCustomerId, squareCustomerId, email.toLowerCase()]
     );
     return rows[0];
-  },
-
-  async updateCardOnFile(squareCustomerId, hasCard) {
-    await pool.query(
-      'UPDATE customers SET has_card_on_file = $1 WHERE square_customer_id = $2',
-      [hasCard, squareCustomerId]
-    );
   },
 };
 

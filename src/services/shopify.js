@@ -1,49 +1,68 @@
 const crypto = require('crypto');
 const config = require('../config');
+const { withRetry } = require('./retry');
 
 const REST_URL = `https://${config.shopify.storeUrl}/admin/api/2025-01`;
 const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2025-01/graphql.json`;
 
 async function shopifyFetch(endpoint, options = {}) {
   const url = `${REST_URL}${endpoint}`;
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': config.shopify.adminApiToken,
-      ...options.headers,
+  const method = options.method || 'GET';
+  return withRetry(
+    async () => {
+      const res = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.shopify.adminApiToken,
+          ...options.headers,
+        },
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        const err = new Error(`Shopify API ${res.status}: ${body}`);
+        err.statusCode = res.status;
+        throw err;
+      }
+
+      if (res.status === 204) return null;
+      return res.json();
     },
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Shopify API ${res.status}: ${body}`);
-  }
-
-  if (res.status === 204) return null;
-  return res.json();
+    { name: `shopify.${method}.${endpoint}` }
+  );
 }
 
 async function shopifyGraphQL(query, variables = {}) {
-  const res = await fetch(GRAPHQL_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Shopify-Access-Token': config.shopify.adminApiToken,
+  // Extract operation name from query for better retry logs
+  const opName = query.match(/(?:mutation|query)\s+(\w+)/)?.[1] || 'graphql';
+  return withRetry(
+    async () => {
+      const res = await fetch(GRAPHQL_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': config.shopify.adminApiToken,
+        },
+        body: JSON.stringify({ query, variables }),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        const err = new Error(`Shopify GraphQL ${res.status}: ${body}`);
+        err.statusCode = res.status;
+        throw err;
+      }
+
+      const data = await res.json();
+      if (data.errors) {
+        // Application-level errors (validation, etc) — not retryable.
+        throw new Error(`Shopify GraphQL errors: ${JSON.stringify(data.errors)}`);
+      }
+      return data;
     },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Shopify GraphQL ${res.status}: ${body}`);
-  }
-
-  const data = await res.json();
-  if (data.errors) {
-    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(data.errors)}`);
-  }
-  return data;
+    { name: `shopify.graphql.${opName}` }
+  );
 }
 
 // --- Mark Order as Paid ---

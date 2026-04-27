@@ -6,7 +6,6 @@ const migration = `
     shopify_customer_id TEXT UNIQUE,
     square_customer_id TEXT,
     email TEXT NOT NULL,
-    has_card_on_file BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW()
   );
 
