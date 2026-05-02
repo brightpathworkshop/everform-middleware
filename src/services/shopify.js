@@ -139,9 +139,15 @@ function parseOrderPayload(payload) {
   // Total is what the customer actually pays
   const total = parseFloat(payload.total_price || 0);
 
-  // Subtotal is total minus actual shipping
+  // Subtotal for the Square invoice: total minus actual shipping
   // This ensures product cost + shipping = total (no double-counting discounts)
   const subtotal = total - shippingTotal;
+
+  // Commission base: post-discount, pre-tax, no shipping. Comes directly
+  // from Shopify's subtotal_price field. Kept separate from `subtotal` above
+  // because that one feeds the Square invoice line item (which must reconcile
+  // to the customer-paid total).
+  const productSubtotal = parseFloat(payload.subtotal_price || 0);
 
   return {
     shopifyOrderId: String(payload.id),
@@ -154,6 +160,7 @@ function parseOrderPayload(payload) {
     subtotal,
     shipping: shippingTotal,
     total,
+    productSubtotal,
   };
 }
 

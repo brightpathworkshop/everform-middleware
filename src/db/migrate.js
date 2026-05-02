@@ -20,11 +20,16 @@ const migration = `
     square_payment_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     total NUMERIC(10, 2),
+    product_subtotal NUMERIC(10, 2),
+    referral_id UUID,
     created_at TIMESTAMPTZ DEFAULT NOW()
   );
+  ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_subtotal NUMERIC(10, 2);
+  ALTER TABLE orders ADD COLUMN IF NOT EXISTS referral_id UUID;
 
   CREATE INDEX IF NOT EXISTS idx_orders_shopify_id ON orders(shopify_order_id);
   CREATE INDEX IF NOT EXISTS idx_orders_square_invoice ON orders(square_invoice_id);
+  CREATE INDEX IF NOT EXISTS idx_orders_referral_id ON orders(referral_id) WHERE referral_id IS NOT NULL;
 `;
 
 async function migrate() {

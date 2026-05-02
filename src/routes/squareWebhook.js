@@ -52,6 +52,33 @@ router.post('/webhooks/square', async (req, res) => {
       // Update order status
       await db.orders.updatePayment(order.shopify_order_id, paymentId);
 
+      // Write commission row if this order was attributed to a partner referral.
+      // commission_rate_applied + commission_amount stay NULL until the
+      // end-of-month finalize job runs. Idempotent via UNIQUE on shopify_order_id.
+      if (order.referral_id) {
+        try {
+          const commission = await db.commissions.createForPaidOrder({ orderRow: order });
+          if (commission) {
+            console.log(
+              `[Square Webhook] Order #${order.shopify_order_number} commission row written (referral ${order.referral_id}, subtotal $${order.product_subtotal})`
+            );
+          } else {
+            console.log(
+              `[Square Webhook] Order #${order.shopify_order_number} commission already exists — skipping`
+            );
+          }
+        } catch (err) {
+          console.error(
+            `[Square Webhook] Order #${order.shopify_order_number} commission write failed:`,
+            err.message
+          );
+          alertMerchant(
+            'Commission write failed',
+            `Order #${order.shopify_order_number} (referral ${order.referral_id}) paid but commission row not written: ${err.message}`
+          );
+        }
+      }
+
       // Mark Shopify order as paid (shopifyGraphQL retries transient errors internally)
       try {
         await shopify.markOrderAsPaid(order.shopify_order_id, { squareInvoiceId });

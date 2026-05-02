@@ -28,14 +28,29 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       return;
     }
 
-    // 3. Store order in DB
+    // 3. Look up open referral (if customer was referred by a partner).
+    // Stamps referral_id onto the order so the Square payment webhook can
+    // write a commission row when the invoice is paid.
+    const referral = await db.referrals.findOpenForCustomer({
+      shopifyCustomerId: order.shopifyCustomerId,
+      email: order.email,
+    });
+    if (referral) {
+      console.log(
+        `[Order #${order.shopifyOrderNumber}] Attributed to referral ${referral.id} (partner ${referral.partner_id})`
+      );
+    }
+
+    // 4. Store order in DB
     await db.orders.create({
       shopifyOrderId: order.shopifyOrderId,
       shopifyOrderNumber: order.shopifyOrderNumber,
       total: order.total,
+      productSubtotal: order.productSubtotal,
+      referralId: referral?.id || null,
     });
 
-    // 4. Find or create Square customer
+    // 5. Find or create Square customer
     const { customer: squareCustomer } = await square.findOrCreateCustomer({
       email: order.email,
       firstName: order.firstName,
@@ -43,14 +58,14 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       phone: order.phone,
     });
 
-    // 5. Save customer mapping
+    // 6. Save customer mapping
     await db.customers.create({
       shopifyCustomerId: order.shopifyCustomerId,
       squareCustomerId: squareCustomer.id,
       email: order.email,
     });
 
-    // 6. Create and send invoice
+    // 7. Create and send invoice
     console.log(`[Order #${order.shopifyOrderNumber}] Creating invoice`);
     const invoice = await square.createAndSendInvoice({
       squareCustomerId: squareCustomer.id,
