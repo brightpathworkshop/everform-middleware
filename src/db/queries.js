@@ -87,12 +87,13 @@ const orders = {
 const referrals = {
   // Find an open referral attributing this customer to a partner.
   // Prefers shopify_customer_id match; falls back to case-insensitive email.
-  // Returns null if no referral matches or all matches have expired.
+  // attribution_expires_at IS NULL means the referral is perpetual (e.g.,
+  // grandfathered partners). Returns null if no referral matches.
   async findOpenForCustomer({ shopifyCustomerId, email }) {
     const { rows } = await pool.query(
       `SELECT *
          FROM referrals
-        WHERE attribution_expires_at >= CURRENT_DATE
+        WHERE (attribution_expires_at IS NULL OR attribution_expires_at >= CURRENT_DATE)
           AND (
             ($1::text IS NOT NULL AND $1::text <> '' AND shopify_customer_id = $1)
             OR ($2::text IS NOT NULL AND $2::text <> '' AND lower(customer_email) = lower($2))
