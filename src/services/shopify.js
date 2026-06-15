@@ -130,11 +130,15 @@ function verifyWebhookSignature(body, hmacHeader) {
 // --- Parse Order Data ---
 
 function parseOrderPayload(payload) {
-  // Get the ACTUAL shipping cost after any shipping discounts (e.g., free shipping codes)
-  // total_shipping_price_set contains the final shipping amount the customer pays
-  const shippingTotal = parseFloat(
-    payload.total_shipping_price_set?.shop_money?.amount || 0
-  );
+  // Post-discount shipping the customer actually pays.
+  // `total_shipping_price_set` is gross (excludes order-level shipping discounts),
+  // so a free-shipping code would still report the original amount and the Square
+  // invoice would carry a phantom shipping line. Sum `shipping_lines[].discounted_price`
+  // instead — that field is always the post-discount per-line amount.
+  const shippingLines = payload.shipping_lines || [];
+  const shippingTotal = shippingLines.reduce((sum, line) => {
+    return sum + parseFloat(line.discounted_price ?? line.price ?? 0);
+  }, 0);
 
   // Total is what the customer actually pays
   const total = parseFloat(payload.total_price || 0);
