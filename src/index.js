@@ -1,4 +1,5 @@
 const express = require('express');
+const cron = require('node-cron');
 const config = require('./config');
 const rawBodyMiddleware = require('./middleware/rawBody');
 const shopifyAuth = require('./routes/shopifyAuth');
@@ -6,6 +7,7 @@ const shopifyWebhook = require('./routes/shopifyWebhook');
 const shopifyCustomerWebhook = require('./routes/shopifyCustomerWebhook');
 const squareWebhook = require('./routes/squareWebhook');
 const pool = require('./db/pool');
+const { finalizeAllClosedPeriods } = require('./jobs/finalize-period');
 
 const app = express();
 
@@ -28,6 +30,26 @@ app.use('/auth', shopifyAuth);
 app.use(shopifyWebhook);
 app.use(shopifyCustomerWebhook);
 app.use(squareWebhook);
+
+// Daily statement-period finalize sweep. Runs at 01:15 UTC every day and
+// closes any (partner, period) pair whose period has fully ended and still
+// has open commission rows — normal end-of-month case plus late-arriving
+// webhooks. finalizePeriodForPartner is idempotent so extra runs are safe.
+// Node-cron re-registers on process start; if the container is down at
+// exactly 01:15 UTC on the 1st, the next daily run picks up the same
+// still-open rows.
+cron.schedule(
+  '15 1 * * *',
+  async () => {
+    console.log('[cron] Running finalize sweep');
+    try {
+      await finalizeAllClosedPeriods();
+    } catch (err) {
+      console.error('[cron] Finalize sweep failed:', err.message);
+    }
+  },
+  { timezone: 'UTC' }
+);
 
 // Start server first (so healthcheck passes), then run migrations
 app.listen(config.port, async () => {
