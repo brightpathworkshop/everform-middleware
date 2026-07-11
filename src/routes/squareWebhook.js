@@ -34,11 +34,30 @@ router.post('/webhooks/square', async (req, res) => {
     `[Square Webhook] Event: ${event.type} · account: ${matchedAccount.name} (slot ${matchedAccount.env_var_slot})`
   );
 
+  // Log the event as soon as we've validated the signature. Update the
+  // processed flag after the handler runs (or set to null if no handler
+  // — acknowledged but no action needed).
+  const object = event.data?.object || {};
+  const objectId =
+    object.invoice?.id || object.dispute?.id || object.payout?.id || null;
+  const logId = await db.squareWebhookEvents.insertReceived({
+    squareAccountId: matchedAccount.id,
+    squareEventId: event.event_id,
+    eventType: event.type,
+    objectId,
+    merchantId: event.merchant_id,
+    payload: object,
+  });
+
   try {
     if (event.type === 'invoice.payment_made') {
       const invoiceData = event.data?.object?.invoice;
       if (!invoiceData) {
         console.warn('[Square Webhook] No invoice data in event');
+        await db.squareWebhookEvents.markProcessed(logId, {
+          processedOk: false,
+          error: 'no invoice data in event',
+        });
         return;
       }
 
@@ -48,11 +67,16 @@ router.post('/webhooks/square', async (req, res) => {
       const order = await db.orders.findBySquareInvoiceId(squareInvoiceId);
       if (!order) {
         console.warn(`[Square Webhook] No order found for invoice ${squareInvoiceId}`);
+        await db.squareWebhookEvents.markProcessed(logId, {
+          processedOk: false,
+          error: `no order found for invoice ${squareInvoiceId}`,
+        });
         return;
       }
 
       if (order.status === 'paid') {
         console.log(`[Square Webhook] Order #${order.shopify_order_number} already paid — skipping`);
+        await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
         return;
       }
 
@@ -65,8 +89,6 @@ router.post('/webhooks/square', async (req, res) => {
       await db.orders.updatePayment(order.shopify_order_id, paymentId);
 
       // Write commission row if this order was attributed to a partner referral.
-      // commission_rate_applied + commission_amount stay NULL until the
-      // end-of-month finalize job runs. Idempotent via UNIQUE on shopify_order_id.
       if (order.referral_id) {
         try {
           const commission = await db.commissions.createForPaidOrder({ orderRow: order });
@@ -101,9 +123,19 @@ router.post('/webhooks/square', async (req, res) => {
           `Order #${order.shopify_order_number} invoice ${squareInvoiceId} paid but Shopify not updated after retries: ${err.message}`
         );
       }
+      await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
+    } else {
+      // Unhandled event type — logged for visibility, no action taken.
+      // processed_ok stays NULL so the admin log renders it as "logged"
+      // (distinct from "handled OK" and "handler errored").
+      console.log(`[Square Webhook] ${event.type} logged, no handler yet`);
     }
   } catch (err) {
     console.error('[Square Webhook] Processing failed:', err.message);
+    await db.squareWebhookEvents.markProcessed(logId, {
+      processedOk: false,
+      error: err.message,
+    });
     alertMerchant('Square webhook processing failed', err.message);
   }
 });

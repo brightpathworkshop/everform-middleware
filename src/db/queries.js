@@ -359,4 +359,55 @@ const commissions = {
   },
 };
 
-module.exports = { customers, orders, referrals, commissions };
+// Best-effort logger for Square webhook events. Insert-on-receive so we
+// always have a record even if the handler crashes; update-after-handler
+// records the outcome. Idempotent on square_event_id via the unique
+// partial index — a Square replay of the same event no-ops on the insert.
+const squareWebhookEvents = {
+  async insertReceived({
+    squareAccountId,
+    squareEventId,
+    eventType,
+    objectId,
+    merchantId,
+    payload,
+  }) {
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO public.square_webhook_events
+           (square_account_id, square_event_id, event_type, object_id, merchant_id, payload)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (square_event_id) DO NOTHING
+         RETURNING id`,
+        [
+          squareAccountId,
+          squareEventId || null,
+          eventType,
+          objectId || null,
+          merchantId || null,
+          payload ? JSON.stringify(payload) : null,
+        ]
+      );
+      return rows[0]?.id || null;
+    } catch (err) {
+      console.error('[db.squareWebhookEvents.insertReceived] failed:', err.message);
+      return null;
+    }
+  },
+
+  async markProcessed(id, { processedOk, error }) {
+    if (!id) return;
+    try {
+      await pool.query(
+        `UPDATE public.square_webhook_events
+            SET processed_ok = $2, processing_error = $3
+          WHERE id = $1`,
+        [id, processedOk, error ? String(error).slice(0, 2000) : null]
+      );
+    } catch (err) {
+      console.error('[db.squareWebhookEvents.markProcessed] failed:', err.message);
+    }
+  },
+};
+
+module.exports = { customers, orders, referrals, commissions, squareWebhookEvents };
