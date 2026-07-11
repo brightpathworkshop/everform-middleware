@@ -11,13 +11,10 @@ module.exports = {
     clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
   },
 
-  square: {
-    accessToken: process.env.SQUARE_ACCESS_TOKEN,
-    applicationId: process.env.SQUARE_APPLICATION_ID,
-    locationId: process.env.SQUARE_LOCATION_ID,
-    environment: process.env.SQUARE_ENVIRONMENT || 'sandbox',
-    webhookSignatureKey: process.env.SQUARE_WEBHOOK_SIGNATURE_KEY,
-  },
+  // Square credentials moved to the multi-tenant square_accounts table.
+  // See src/services/squareAccount.js — env vars are keyed by env_var_slot.
+  // LEGACY slot falls back to unsuffixed SQUARE_ACCESS_TOKEN etc. so the
+  // pre-migration Railway config keeps working without changes.
 
   database: {
     url: process.env.DATABASE_URL,

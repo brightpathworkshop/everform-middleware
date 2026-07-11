@@ -7,12 +7,22 @@ const { alertMerchant } = require('../services/alerts');
 const router = express.Router();
 
 router.post('/webhooks/square', async (req, res) => {
-  // 1. Verify webhook signature
+  // 1. Verify webhook signature against every active Square account. The
+  //    matched account is returned so we can log which account fired the
+  //    event — useful once multiple accounts are configured. Both
+  //    accounts point their webhooks at this same URL.
   const signature = req.headers['x-square-hmacsha256-signature'];
-  // Use https explicitly — Railway terminates TLS at the proxy
   const notificationUrl = `https://${req.get('host')}${req.originalUrl}`;
 
-  if (!signature || !square.verifyWebhookSignature(req.rawBody, signature, notificationUrl)) {
+  const matchedAccount = signature
+    ? await square.verifyWebhookSignatureAndFindAccount(
+        req.rawBody,
+        signature,
+        notificationUrl
+      )
+    : null;
+
+  if (!matchedAccount) {
     console.warn('[Square Webhook] Invalid signature — rejected');
     return res.status(401).send('Invalid signature');
   }
@@ -20,7 +30,9 @@ router.post('/webhooks/square', async (req, res) => {
   res.status(200).send('OK');
 
   const event = req.body;
-  console.log(`[Square Webhook] Event: ${event.type}`);
+  console.log(
+    `[Square Webhook] Event: ${event.type} · account: ${matchedAccount.name} (slot ${matchedAccount.env_var_slot})`
+  );
 
   try {
     if (event.type === 'invoice.payment_made') {

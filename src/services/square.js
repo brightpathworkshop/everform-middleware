@@ -1,24 +1,30 @@
 const { Client, Environment } = require('square');
-const config = require('../config');
 const crypto = require('crypto');
 const { withRetry } = require('./retry');
+const squareAccount = require('./squareAccount');
 
-const client = new Client({
-  accessToken: config.square.accessToken,
-  environment: config.square.environment === 'production'
-    ? Environment.Production
-    : Environment.Sandbox,
-});
-
-const { customersApi, invoicesApi } = client;
+// Returns a { client, account } pair for the currently-primary Square
+// account. Fresh lookup per call so changing the primary in
+// square_accounts takes effect immediately without a middleware restart.
+async function getClient() {
+  const account = await squareAccount.getPrimaryAccount();
+  const client = new Client({
+    accessToken: account.accessToken,
+    environment: account.environment === 'production'
+      ? Environment.Production
+      : Environment.Sandbox,
+  });
+  return { client, account };
+}
 
 // --- Customer Management ---
 
 async function findCustomerByEmail(email) {
   try {
+    const { client } = await getClient();
     const { result } = await withRetry(
       () =>
-        customersApi.searchCustomers({
+        client.customersApi.searchCustomers({
           query: { filter: { emailAddress: { exact: email.toLowerCase() } } },
         }),
       { name: 'square.searchCustomers' }
@@ -33,9 +39,10 @@ async function findCustomerByEmail(email) {
 async function createCustomer({ email, firstName, lastName, phone }) {
   const idempotencyKey = crypto.randomUUID();
   try {
+    const { client } = await getClient();
     const { result } = await withRetry(
       () =>
-        customersApi.createCustomer({
+        client.customersApi.createCustomer({
           idempotencyKey,
           emailAddress: email.toLowerCase(),
           givenName: firstName,
@@ -69,6 +76,7 @@ async function findOrCreateCustomer({ email, firstName, lastName, phone }) {
 
 async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subtotal, shipping }) {
   try {
+    const { client, account } = await getClient();
     const lineItems = [
       {
         name: 'Research Materials',
@@ -97,7 +105,7 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
         client.ordersApi.createOrder({
           idempotencyKey: orderIdempotencyKey,
           order: {
-            locationId: config.square.locationId,
+            locationId: account.locationId,
             customerId: squareCustomerId,
             lineItems,
             metadata: { shopify_order_number: shopifyOrderNumber },
@@ -111,10 +119,10 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
     const invoiceIdempotencyKey = crypto.randomUUID();
     const { result } = await withRetry(
       () =>
-        invoicesApi.createInvoice({
+        client.invoicesApi.createInvoice({
           idempotencyKey: invoiceIdempotencyKey,
           invoice: {
-            locationId: config.square.locationId,
+            locationId: account.locationId,
             orderId,
             primaryRecipient: { customerId: squareCustomerId },
             paymentRequests: [
@@ -140,12 +148,14 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
     );
 
     const invoice = result.invoice;
-    console.log(`[Square] Created invoice ${invoice.id} for order #${shopifyOrderNumber}`);
+    console.log(
+      `[Square] Created invoice ${invoice.id} for order #${shopifyOrderNumber} via account "${account.name}"`
+    );
 
     const publishIdempotencyKey = crypto.randomUUID();
     const publishResult = await withRetry(
       () =>
-        invoicesApi.publishInvoice(invoice.id, {
+        client.invoicesApi.publishInvoice(invoice.id, {
           version: invoice.version,
           idempotencyKey: publishIdempotencyKey,
         }),
@@ -153,7 +163,10 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
     );
 
     console.log(`[Square] Published invoice ${invoice.id}`);
-    return publishResult.result.invoice;
+    // Return both the invoice and the account so the caller can persist
+    // which Square account this order belongs to (needed for payment
+    // webhook attribution across multiple accounts).
+    return { invoice: publishResult.result.invoice, account };
   } catch (err) {
     console.error('[Square] Invoice creation failed:', err.message);
     if (err.errors) {
@@ -168,15 +181,33 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
 
 // --- Webhook Verification ---
 
-function verifyWebhookSignature(body, signature, url) {
-  const hmac = crypto.createHmac('sha256', config.square.webhookSignatureKey);
-  hmac.update(url + body);
-  const expectedSignature = hmac.digest('base64');
-  return signature === expectedSignature;
+// Looks up every active Square account and tries their signature key
+// against the incoming payload. Returns the matched account (with
+// credentials) on success, or null on no match — so the webhook route
+// can (a) reject unauthorized payloads and (b) know which account the
+// event came from for attribution.
+async function verifyWebhookSignatureAndFindAccount(body, signature, url) {
+  const accounts = await squareAccount.getAllActiveAccounts();
+  for (const acc of accounts) {
+    if (!acc.webhookSignatureKey) continue;
+    const hmac = crypto.createHmac('sha256', acc.webhookSignatureKey);
+    hmac.update(url + body);
+    const expected = hmac.digest('base64');
+    if (signature === expected) return acc;
+  }
+  return null;
+}
+
+// Backwards-compat shim for callers that still expect the old boolean
+// verify. Discards the account attribution — only new code should use
+// verifyWebhookSignatureAndFindAccount.
+async function verifyWebhookSignature(body, signature, url) {
+  return (await verifyWebhookSignatureAndFindAccount(body, signature, url)) !== null;
 }
 
 module.exports = {
   findOrCreateCustomer,
   createAndSendInvoice,
   verifyWebhookSignature,
+  verifyWebhookSignatureAndFindAccount,
 };
