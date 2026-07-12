@@ -359,6 +359,69 @@ const commissions = {
   },
 };
 
+// Refund handling on commissions. Cascades the reversal from the direct
+// commission row (partner) to every override row generated from it (any
+// ancestor Recruiting Partners). The direct row is identified by
+// (shopify_order_id, is_override = false); overrides trace back via
+// source_commission_id. Idempotent: an already-refunded row (refund_adjustment
+// >= commission_amount) is untouched.
+async function refundCommissionsForOrder({ shopifyOrderId, refundFraction = 1 }) {
+  const { rows: directRows } = await pool.query(
+    `SELECT id, commission_amount, product_subtotal, refund_adjustment
+       FROM public.commissions
+      WHERE shopify_order_id = $1 AND is_override = false
+      FOR UPDATE`,
+    [shopifyOrderId]
+  );
+  if (directRows.length === 0) return { direct: 0, overrides: 0 };
+  let directUpdated = 0;
+  let overrideUpdated = 0;
+
+  for (const direct of directRows) {
+    // Base amount: the locked commission if we have it, otherwise the
+    // projected commission at the max possible rate the partner could hit
+    // this month. We can't compute the true tier-effective rate here
+    // without the full-month rows; overshooting on the reversal is safer
+    // than undershooting and leaving the partner overpaid.
+    const currentAmount = Number(direct.commission_amount || 0);
+    const currentRefund = Number(direct.refund_adjustment || 0);
+    const base = currentAmount > 0 ? currentAmount : Number(direct.product_subtotal || 0);
+    const targetRefund = Math.min(base, base * refundFraction);
+    if (targetRefund <= currentRefund + 0.005) continue; // already refunded
+    await pool.query(
+      `UPDATE public.commissions
+          SET refund_adjustment = $2
+        WHERE id = $1`,
+      [direct.id, targetRefund.toFixed(2)]
+    );
+    directUpdated += 1;
+
+    // Cascade to overrides that were written off this direct row. Their
+    // commission_amount is locked at write time (flat per-level rate), so
+    // reversal is straightforward.
+    const { rows: overrideRows } = await pool.query(
+      `SELECT id, commission_amount, refund_adjustment
+         FROM public.commissions
+        WHERE source_commission_id = $1`,
+      [direct.id]
+    );
+    for (const ov of overrideRows) {
+      const ovBase = Number(ov.commission_amount || 0);
+      const ovCurrentRefund = Number(ov.refund_adjustment || 0);
+      const ovTarget = Math.min(ovBase, ovBase * refundFraction);
+      if (ovTarget <= ovCurrentRefund + 0.005) continue;
+      await pool.query(
+        `UPDATE public.commissions
+            SET refund_adjustment = $2
+          WHERE id = $1`,
+        [ov.id, ovTarget.toFixed(2)]
+      );
+      overrideUpdated += 1;
+    }
+  }
+  return { direct: directUpdated, overrides: overrideUpdated };
+}
+
 // Best-effort logger for Square webhook events. Insert-on-receive so we
 // always have a record even if the handler crashes; update-after-handler
 // records the outcome. Idempotent on square_event_id via the unique
@@ -409,5 +472,7 @@ const squareWebhookEvents = {
     }
   },
 };
+
+commissions.refundForOrder = refundCommissionsForOrder;
 
 module.exports = { customers, orders, referrals, commissions, squareWebhookEvents };

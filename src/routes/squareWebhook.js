@@ -124,6 +124,77 @@ router.post('/webhooks/square', async (req, res) => {
         );
       }
       await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
+    } else if (event.type === 'invoice.refunded') {
+      const invoiceData = event.data?.object?.invoice;
+      if (!invoiceData) {
+        await db.squareWebhookEvents.markProcessed(logId, {
+          processedOk: false,
+          error: 'no invoice data in refund event',
+        });
+        return;
+      }
+      const squareInvoiceId = invoiceData.id;
+      const order = await db.orders.findBySquareInvoiceId(squareInvoiceId);
+      if (!order) {
+        console.warn(`[Square Webhook] Refund: no order for invoice ${squareInvoiceId}`);
+        await db.squareWebhookEvents.markProcessed(logId, {
+          processedOk: false,
+          error: `no order found for invoice ${squareInvoiceId}`,
+        });
+        return;
+      }
+
+      // Refund fraction: Square includes payment_requests[].total_completed_amount_money
+      // for the original charge; refunded_money if present tells us how much
+      // came back. When we can compute it, do proportional reversal;
+      // otherwise treat as full refund.
+      let refundFraction = 1;
+      try {
+        const pr = invoiceData.payment_requests?.[0];
+        const paid = Number(pr?.total_completed_amount_money?.amount || 0);
+        const refunded = Number(pr?.refunded_money?.amount || 0);
+        if (paid > 0 && refunded > 0 && refunded < paid) {
+          refundFraction = refunded / paid;
+        }
+      } catch {
+        // fall through with full refund
+      }
+
+      const result = await db.commissions.refundForOrder({
+        shopifyOrderId: order.shopify_order_id,
+        refundFraction,
+      });
+      console.log(
+        `[Square Webhook] Refund for order #${order.shopify_order_number}: reversed ${result.direct} direct + ${result.overrides} override rows (fraction ${refundFraction.toFixed(2)})`
+      );
+
+      // Flip the order status so the ledger + admin views reflect it.
+      try {
+        await db.orders.updateStatus(order.shopify_order_id, 'refunded');
+      } catch (err) {
+        console.error('[Square Webhook] Order status update failed:', err.message);
+      }
+
+      // Note the Shopify order for the admin trail — we do NOT auto-create
+      // a Shopify refund transaction (that requires inventory + line-item
+      // decisions Brandon handles manually).
+      try {
+        await shopify.addOrderNote(
+          order.shopify_order_id,
+          `Square refund received on invoice ${squareInvoiceId}${
+            refundFraction < 1 ? ` (partial: ${(refundFraction * 100).toFixed(0)}%)` : ''
+          }. Commission reversed. Review Shopify order status + inventory manually.`
+        );
+      } catch (err) {
+        console.error('[Square Webhook] Shopify order note failed:', err.message);
+      }
+
+      alertMerchant(
+        'Square refund received',
+        `Order #${order.shopify_order_number} · invoice ${squareInvoiceId} · ${refundFraction < 1 ? `partial ${(refundFraction * 100).toFixed(0)}%` : 'full'} refund. Commission auto-reversed. Review Shopify status + inventory.`
+      );
+
+      await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
     } else {
       // Unhandled event type — logged for visibility, no action taken.
       // processed_ok stays NULL so the admin log renders it as "logged"
