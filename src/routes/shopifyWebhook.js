@@ -65,9 +65,12 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       email: order.email,
     });
 
-    // 7. Create and send invoice
+    // 7. Create and send invoice. After the multi-account refactor
+    // createAndSendInvoice returns { invoice, account } — using the raw
+    // result as an invoice writes NULL as square_invoice_id, which then
+    // breaks payment webhook attribution downstream.
     console.log(`[Order #${order.shopifyOrderNumber}] Creating invoice`);
-    const invoice = await square.createAndSendInvoice({
+    const { invoice } = await square.createAndSendInvoice({
       squareCustomerId: squareCustomer.id,
       shopifyOrderNumber: order.shopifyOrderNumber,
       subtotal: order.subtotal,
