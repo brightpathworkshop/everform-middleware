@@ -3,6 +3,7 @@ const square = require('../services/square');
 const shopify = require('../services/shopify');
 const db = require('../db/queries');
 const { alertMerchant } = require('../services/alerts');
+const pipeline = require('../services/pipelineLog');
 
 const router = express.Router();
 
@@ -67,6 +68,14 @@ router.post('/webhooks/square', async (req, res) => {
       const order = await db.orders.findBySquareInvoiceId(squareInvoiceId);
       if (!order) {
         console.warn(`[Square Webhook] No order found for invoice ${squareInvoiceId}`);
+        await pipeline.log({
+          squareInvoiceId,
+          squareAccountId: matchedAccount.id,
+          category: 'square_webhook',
+          eventName: 'invoice.payment_made.no_match',
+          status: 'error',
+          errorMessage: `No order row for invoice ${squareInvoiceId}`,
+        });
         await db.squareWebhookEvents.markProcessed(logId, {
           processedOk: false,
           error: `no order found for invoice ${squareInvoiceId}`,
@@ -74,19 +83,40 @@ router.post('/webhooks/square', async (req, res) => {
         return;
       }
 
+      const orderKeys = {
+        orderId: order.id,
+        shopifyOrderId: order.shopify_order_id,
+        shopifyOrderNumber: order.shopify_order_number,
+        squareInvoiceId,
+        squareAccountId: matchedAccount.id,
+      };
+      await pipeline.log({
+        ...orderKeys,
+        category: 'square_webhook',
+        eventName: 'invoice.payment_made',
+        message: `Square reports payment on invoice ${squareInvoiceId}`,
+      });
+
       if (order.status === 'paid') {
         console.log(`[Square Webhook] Order #${order.shopify_order_number} already paid — skipping`);
+        await pipeline.log({
+          ...orderKeys,
+          category: 'db',
+          eventName: 'orders.already_paid_skip',
+          status: 'skipped',
+        });
         await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
         return;
       }
 
-      // Extract payment ID from invoice
-      const paymentId = invoiceData.payment_requests?.[0]?.computed_amount_money
-        ? squareInvoiceId // Use invoice ID as reference if no direct payment ID
-        : squareInvoiceId;
-
-      // Update order status
+      const paymentId = squareInvoiceId;
       await db.orders.updatePayment(order.shopify_order_id, paymentId);
+      await pipeline.log({
+        ...orderKeys,
+        category: 'db',
+        eventName: 'orders.marked_paid',
+        message: 'orders.status → paid',
+      });
 
       // Write commission row if this order was attributed to a partner referral.
       if (order.referral_id) {
@@ -96,16 +126,34 @@ router.post('/webhooks/square', async (req, res) => {
             console.log(
               `[Square Webhook] Order #${order.shopify_order_number} commission row written (referral ${order.referral_id}, subtotal $${order.product_subtotal})`
             );
+            await pipeline.log({
+              ...orderKeys,
+              category: 'commission',
+              eventName: 'commission.direct_written',
+              message: `Direct commission row written · subtotal $${order.product_subtotal}`,
+              payload: { referral_id: order.referral_id },
+            });
           } else {
-            console.log(
-              `[Square Webhook] Order #${order.shopify_order_number} commission already exists — skipping`
-            );
+            await pipeline.log({
+              ...orderKeys,
+              category: 'commission',
+              eventName: 'commission.already_exists',
+              status: 'skipped',
+              message: 'Commission row already exists — no reprocess',
+            });
           }
         } catch (err) {
           console.error(
             `[Square Webhook] Order #${order.shopify_order_number} commission write failed:`,
             err.message
           );
+          await pipeline.log({
+            ...orderKeys,
+            category: 'commission',
+            eventName: 'commission.write_failed',
+            status: 'error',
+            errorMessage: err.message,
+          });
           alertMerchant(
             'Commission write failed',
             `Order #${order.shopify_order_number} (referral ${order.referral_id}) paid but commission row not written: ${err.message}`
@@ -113,9 +161,11 @@ router.post('/webhooks/square', async (req, res) => {
         }
       }
 
-      // Mark Shopify order as paid (shopifyGraphQL retries transient errors internally)
       try {
-        await shopify.markOrderAsPaid(order.shopify_order_id, { squareInvoiceId });
+        await pipeline.measure(
+          { ...orderKeys, category: 'shopify_api', eventName: 'shopify.order_mark_as_paid' },
+          () => shopify.markOrderAsPaid(order.shopify_order_id, { squareInvoiceId })
+        );
         console.log(`[Square Webhook] Order #${order.shopify_order_number} marked as paid in Shopify`);
       } catch (err) {
         alertMerchant(
@@ -137,12 +187,34 @@ router.post('/webhooks/square', async (req, res) => {
       const order = await db.orders.findBySquareInvoiceId(squareInvoiceId);
       if (!order) {
         console.warn(`[Square Webhook] Refund: no order for invoice ${squareInvoiceId}`);
+        await pipeline.log({
+          squareInvoiceId,
+          squareAccountId: matchedAccount.id,
+          category: 'square_webhook',
+          eventName: 'invoice.refunded.no_match',
+          status: 'error',
+          errorMessage: `No order row for invoice ${squareInvoiceId}`,
+        });
         await db.squareWebhookEvents.markProcessed(logId, {
           processedOk: false,
           error: `no order found for invoice ${squareInvoiceId}`,
         });
         return;
       }
+
+      const refundKeys = {
+        orderId: order.id,
+        shopifyOrderId: order.shopify_order_id,
+        shopifyOrderNumber: order.shopify_order_number,
+        squareInvoiceId,
+        squareAccountId: matchedAccount.id,
+      };
+      await pipeline.log({
+        ...refundKeys,
+        category: 'square_webhook',
+        eventName: 'invoice.refunded',
+        message: `Square refund posted on invoice ${squareInvoiceId}`,
+      });
 
       // Refund fraction: Square includes payment_requests[].total_completed_amount_money
       // for the original charge; refunded_money if present tells us how much
@@ -167,12 +239,31 @@ router.post('/webhooks/square', async (req, res) => {
       console.log(
         `[Square Webhook] Refund for order #${order.shopify_order_number}: reversed ${result.direct} direct + ${result.overrides} override rows (fraction ${refundFraction.toFixed(2)})`
       );
+      await pipeline.log({
+        ...refundKeys,
+        category: 'commission',
+        eventName: 'commission.refunded',
+        message: `Reversed ${result.direct} direct + ${result.overrides} override rows at ${(refundFraction * 100).toFixed(0)}%`,
+        payload: { refund_fraction: refundFraction, ...result },
+      });
 
       // Flip the order status so the ledger + admin views reflect it.
       try {
         await db.orders.updateStatus(order.shopify_order_id, 'refunded');
+        await pipeline.log({
+          ...refundKeys,
+          category: 'db',
+          eventName: 'orders.marked_refunded',
+        });
       } catch (err) {
         console.error('[Square Webhook] Order status update failed:', err.message);
+        await pipeline.log({
+          ...refundKeys,
+          category: 'db',
+          eventName: 'orders.mark_refunded_failed',
+          status: 'error',
+          errorMessage: err.message,
+        });
       }
 
       // Note the Shopify order for the admin trail — we do NOT auto-create
@@ -197,9 +288,30 @@ router.post('/webhooks/square', async (req, res) => {
       await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
     } else {
       // Unhandled event type — logged for visibility, no action taken.
-      // processed_ok stays NULL so the admin log renders it as "logged"
-      // (distinct from "handled OK" and "handler errored").
+      // Log it to pipeline_events too with whatever object we can extract
+      // (invoice/dispute/payout id) so it shows up in the unified feed.
       console.log(`[Square Webhook] ${event.type} logged, no handler yet`);
+      const obj = event.data?.object || {};
+      const inferredInvoiceId = obj.invoice?.id || null;
+      let inferredOrder = null;
+      if (inferredInvoiceId) {
+        try {
+          inferredOrder = await db.orders.findBySquareInvoiceId(inferredInvoiceId);
+        } catch {
+          // best-effort lookup
+        }
+      }
+      await pipeline.log({
+        squareAccountId: matchedAccount.id,
+        squareInvoiceId: inferredInvoiceId,
+        orderId: inferredOrder?.id || null,
+        shopifyOrderId: inferredOrder?.shopify_order_id || null,
+        shopifyOrderNumber: inferredOrder?.shopify_order_number || null,
+        category: 'square_webhook',
+        eventName: event.type,
+        status: 'info',
+        message: 'Received, no handler wired',
+      });
     }
   } catch (err) {
     console.error('[Square Webhook] Processing failed:', err.message);
