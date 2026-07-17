@@ -29,7 +29,13 @@ function requireJobSecret(req, res, next) {
 // requiring the shopify order to be recreated.
 //
 // Body: { shopify_order_id: string }
-router.post('/jobs/reprocess-order', express.json(), requireJobSecret, async (req, res) => {
+// NOTE: no express.json() here — the global rawBodyMiddleware in
+// src/middleware/rawBody.js already consumes the request stream and
+// populates req.body. Adding express.json() on top hangs the second
+// parser waiting for a stream that's already ended, producing a 500
+// with no useful error surfaced (which is exactly what happened when
+// this endpoint was first wired).
+router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
   const shopifyOrderId = String(req.body?.shopify_order_id || '').trim();
   if (!shopifyOrderId) {
     return res.status(400).json({ ok: false, error: 'Missing shopify_order_id' });
