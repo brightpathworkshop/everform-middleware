@@ -96,6 +96,24 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       message: 'Order row persisted (status=pending)',
     });
 
+    // 4a. Zero-subtotal orders skip Square entirely. Common for internal
+    // fulfillment fixups (reshipping a lost package, printing a shipping
+    // label with no customer charge). Square Invoices API returns 400 on
+    // zero-amount invoices, and there's no money to collect anyway — no
+    // point creating one. Mark the order as 'zero_amount' so it stays
+    // out of the Stuck Orders panel.
+    if (!(order.subtotal > 0)) {
+      await db.orders.updateStatus(order.shopifyOrderId, 'zero_amount');
+      await pipeline.log({
+        ...keys,
+        category: 'db',
+        eventName: 'orders.zero_amount_skip',
+        status: 'skipped',
+        message: `Subtotal is $${order.subtotal} — skipping Square invoice creation`,
+      });
+      return;
+    }
+
     // 5. Find or create Square customer
     const { customer: squareCustomer, isNew } = await pipeline.measure(
       { ...keys, category: 'square_api', eventName: 'square.customer_find_or_create' },
