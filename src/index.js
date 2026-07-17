@@ -6,6 +6,7 @@ const shopifyAuth = require('./routes/shopifyAuth');
 const shopifyWebhook = require('./routes/shopifyWebhook');
 const shopifyCustomerWebhook = require('./routes/shopifyCustomerWebhook');
 const squareWebhook = require('./routes/squareWebhook');
+const jobs = require('./routes/jobs');
 const pool = require('./db/pool');
 const { finalizeAllClosedPeriods } = require('./jobs/finalize-period');
 
@@ -30,6 +31,11 @@ app.use('/auth', shopifyAuth);
 app.use(shopifyWebhook);
 app.use(shopifyCustomerWebhook);
 app.use(squareWebhook);
+
+// Admin-triggered jobs (reprocess stuck orders etc.). Auth via shared
+// REPROCESS_SECRET header — set the same value in Railway env and in the
+// portal's env so the /admin/square Reprocess button can call this.
+app.use(jobs);
 
 // Daily statement-period finalize sweep. Runs at 01:15 UTC every day and
 // closes any (partner, period) pair whose period has fully ended and still

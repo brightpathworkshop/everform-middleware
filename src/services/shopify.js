@@ -168,6 +168,14 @@ function parseOrderPayload(payload) {
   };
 }
 
+// Fetch a Shopify order by id (REST) and return the raw payload so the
+// same parseOrderPayload can be used on both webhook receives and manual
+// reprocess flows.
+async function fetchOrderById(shopifyOrderId) {
+  const data = await shopifyFetch(`/orders/${shopifyOrderId}.json`);
+  return data.order;
+}
+
 // --- Generate Account Activation URL ---
 
 async function generateAccountActivationUrl(shopifyCustomerId) {
@@ -193,6 +201,7 @@ async function generateAccountActivationUrl(shopifyCustomerId) {
 }
 
 module.exports = {
+  fetchOrderById,
   markOrderAsPaid,
   addOrderNote,
   verifyWebhookSignature,
