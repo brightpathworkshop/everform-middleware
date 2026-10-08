@@ -5,6 +5,10 @@ const { withRetry } = require('./retry');
 const REST_URL = `https://${config.shopify.storeUrl}/admin/api/2025-01`;
 const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2025-01/graphql.json`;
 
+// Inventory calls pin a newer version: inventorySetQuantities changed shape
+// (the @idempotent directive is required from 2026-04 on).
+const INVENTORY_API_VERSION = '2026-10';
+
 async function shopifyFetch(endpoint, options = {}) {
   const url = `${REST_URL}${endpoint}`;
   const method = options.method || 'GET';
@@ -33,12 +37,15 @@ async function shopifyFetch(endpoint, options = {}) {
   );
 }
 
-async function shopifyGraphQL(query, variables = {}) {
+async function shopifyGraphQL(query, variables = {}, { apiVersion } = {}) {
+  const url = apiVersion
+    ? `https://${config.shopify.storeUrl}/admin/api/${apiVersion}/graphql.json`
+    : GRAPHQL_URL;
   // Extract operation name from query for better retry logs
   const opName = query.match(/(?:mutation|query)\s+(\w+)/)?.[1] || 'graphql';
   return withRetry(
     async () => {
-      const res = await fetch(GRAPHQL_URL, {
+      const res = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -176,6 +183,71 @@ async function fetchOrderById(shopifyOrderId) {
   return data.order;
 }
 
+// --- Inventory ---
+
+// Every variant with its sellable quantity and inventory item, for the
+// portal → Shopify inventory sync. Needs read_products + read_inventory.
+async function listVariantInventory() {
+  const out = [];
+  let after = null;
+  for (;;) {
+    const result = await shopifyGraphQL(
+      `query SyncVariants($after: String) {
+        productVariants(first: 250, after: $after) {
+          nodes { legacyResourceId inventoryQuantity inventoryItem { id tracked } }
+          pageInfo { hasNextPage endCursor }
+        }
+      }`,
+      { after },
+      { apiVersion: INVENTORY_API_VERSION }
+    );
+    const page = result.data.productVariants;
+    for (const v of page.nodes) {
+      out.push({
+        variantId: String(v.legacyResourceId),
+        inventoryQuantity: v.inventoryQuantity,
+        inventoryItemId: v.inventoryItem?.id || null,
+        tracked: !!v.inventoryItem?.tracked,
+      });
+    }
+    if (!page.pageInfo.hasNextPage) break;
+    after = page.pageInfo.endCursor;
+  }
+  return out;
+}
+
+// Set the available quantity for a batch of inventory items at one
+// location. The portal ledger is the source of truth, so no compare check.
+// Needs write_inventory.
+async function setAvailableQuantities({ locationId, quantities, referenceUri }) {
+  const result = await shopifyGraphQL(
+    `mutation SetInventory($input: InventorySetQuantitiesInput!, $key: String!) {
+      inventorySetQuantities(input: $input) @idempotent(key: $key) {
+        userErrors { field message code }
+      }
+    }`,
+    {
+      key: crypto.randomUUID(),
+      input: {
+        name: 'available',
+        reason: 'correction',
+        referenceDocumentUri: referenceUri,
+        quantities: quantities.map((q) => ({
+          inventoryItemId: q.inventoryItemId,
+          locationId,
+          quantity: q.quantity,
+          changeFromQuantity: null,
+        })),
+      },
+    },
+    { apiVersion: INVENTORY_API_VERSION }
+  );
+  const { userErrors } = result.data.inventorySetQuantities;
+  if (userErrors && userErrors.length > 0) {
+    throw new Error(`Shopify inventorySetQuantities failed: ${JSON.stringify(userErrors)}`);
+  }
+}
+
 // --- Generate Account Activation URL ---
 
 async function generateAccountActivationUrl(shopifyCustomerId) {
@@ -202,6 +274,8 @@ async function generateAccountActivationUrl(shopifyCustomerId) {
 
 module.exports = {
   fetchOrderById,
+  listVariantInventory,
+  setAvailableQuantities,
   markOrderAsPaid,
   addOrderNote,
   verifyWebhookSignature,

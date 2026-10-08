@@ -9,6 +9,8 @@ module.exports = {
     webhookSecret: process.env.SHOPIFY_WEBHOOK_SECRET,
     clientId: process.env.SHOPIFY_CLIENT_ID,
     clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
+    // Where stock is held. One location today; override if that changes.
+    locationId: process.env.SHOPIFY_LOCATION_ID || 'gid://shopify/Location/89919914234',
   },
 
   // Square credentials moved to the multi-tenant square_accounts table.

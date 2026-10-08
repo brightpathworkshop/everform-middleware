@@ -4,6 +4,7 @@ const square = require('../services/square');
 const db = require('../db/queries');
 const pipeline = require('../services/pipelineLog');
 const { alertMerchant } = require('../services/alerts');
+const inventorySync = require('../services/inventorySync');
 
 const router = express.Router();
 
@@ -160,6 +161,26 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
     });
     alertMerchant('Order reprocess failed', `${shopifyOrderId}: ${err.message}`);
     return res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
+// Push portal stock to Shopify now. Called by the portal after a manual
+// adjustment or from its "Sync to Shopify" button.
+router.post('/jobs/sync-inventory', requireJobSecret, async (req, res) => {
+  try {
+    const result = await inventorySync.syncShopifyInventory({
+      reason: String(req.body?.reason || 'portal'),
+    });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[jobs] sync-inventory failed:', err.message);
+    await pipeline.log({
+      category: 'inventory',
+      eventName: 'inventory.shopify_sync_failed',
+      status: 'error',
+      errorMessage: err.message,
+    });
+    res.status(502).json({ ok: false, error: err.message });
   }
 });
 

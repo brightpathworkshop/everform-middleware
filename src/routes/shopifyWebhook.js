@@ -4,6 +4,7 @@ const square = require('../services/square');
 const db = require('../db/queries');
 const { alertMerchant } = require('../services/alerts');
 const pipeline = require('../services/pipelineLog');
+const inventorySync = require('../services/inventorySync');
 
 const router = express.Router();
 
@@ -169,6 +170,10 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       },
     });
     console.log(`[Order #${order.shopifyOrderNumber}] Invoice ${invoice.id} sent`);
+
+    // Shopify has lowered the listing that was bought; lower the other
+    // listings that draw on the same vials. Never throws.
+    await inventorySync.syncQuietly({ reason: 'order_created', keys });
   } catch (err) {
     console.error(`[Order #${order.shopifyOrderNumber}] Processing failed:`, err.message);
     await pipeline.log({

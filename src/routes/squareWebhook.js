@@ -5,6 +5,7 @@ const db = require('../db/queries');
 const { alertMerchant } = require('../services/alerts');
 const pipeline = require('../services/pipelineLog');
 const inventory = require('../services/inventory');
+const inventorySync = require('../services/inventorySync');
 
 const router = express.Router();
 
@@ -165,6 +166,8 @@ router.post('/webhooks/square', async (req, res) => {
       // Deduct stock for the paid order. Never throws; a failure here is
       // logged and alerted but cannot hold up the rest of the payment flow.
       await inventory.consumeForPaidOrder({ order, keys: orderKeys });
+      // Then bring every Shopify listing that shares those vials into line.
+      await inventorySync.syncQuietly({ reason: 'order_paid', keys: orderKeys });
 
       try {
         await pipeline.measure(
