@@ -13,6 +13,7 @@ const pool = require('../db/pool');
 //   ghl_api         — outbound GHL API call (contact upsert)
 //   db              — internal DB state change (orders.updateStatus etc)
 //   commission      — commission row written/updated/refunded
+//   inventory       — stock deducted for a paid order (consume_order)
 async function log({
   category,
   eventName,
