@@ -6,10 +6,9 @@ const pool = require('../db/pool');
 const router = express.Router();
 
 // read_products + the inventory scopes are for the portal → Shopify
-// inventory sync (src/services/inventorySync.js); the content scopes let
-// src/services/labReports.js rewrite the Lab Reports page.
+// inventory sync (src/services/inventorySync.js).
 const SCOPES =
-  'read_orders,write_orders,read_customers,write_customers,read_products,read_inventory,write_inventory,read_content,write_content';
+  'read_orders,write_orders,read_customers,write_customers,read_products,read_inventory,write_inventory';
 
 // Shopify redirects here when the merchant clicks "Install"
 // We redirect them to the Shopify OAuth authorization screen

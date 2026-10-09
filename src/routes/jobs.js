@@ -5,7 +5,6 @@ const db = require('../db/queries');
 const pipeline = require('../services/pipelineLog');
 const { alertMerchant } = require('../services/alerts');
 const inventorySync = require('../services/inventorySync');
-const labReports = require('../services/labReports');
 
 const router = express.Router();
 
@@ -178,26 +177,6 @@ router.post('/jobs/sync-inventory', requireJobSecret, async (req, res) => {
     await pipeline.log({
       category: 'inventory',
       eventName: 'inventory.shopify_sync_failed',
-      status: 'error',
-      errorMessage: err.message,
-    });
-    res.status(502).json({ ok: false, error: err.message });
-  }
-});
-
-// Rewrite the store's Lab Reports page from published tests. Called by the
-// portal when a test is saved, or from its "Update Lab Reports page" button.
-router.post('/jobs/sync-lab-reports', requireJobSecret, async (req, res) => {
-  try {
-    const result = await labReports.syncLabReportsPage({
-      reason: String(req.body?.reason || 'portal'),
-    });
-    res.json({ ok: true, ...result });
-  } catch (err) {
-    console.error('[jobs] sync-lab-reports failed:', err.message);
-    await pipeline.log({
-      category: 'inventory',
-      eventName: 'lab_reports.page_sync_failed',
       status: 'error',
       errorMessage: err.message,
     });
