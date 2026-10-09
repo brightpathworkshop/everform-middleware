@@ -248,6 +248,38 @@ async function setAvailableQuantities({ locationId, quantities, referenceUri }) 
   }
 }
 
+// --- Online store pages ---
+
+// Needs read_content (or read_online_store_pages).
+async function getPageByHandle(handle) {
+  const result = await shopifyGraphQL(
+    `query LabPage($q: String!) {
+      pages(first: 5, query: $q) { nodes { id handle title body } }
+    }`,
+    { q: `handle:${handle}` },
+    { apiVersion: INVENTORY_API_VERSION }
+  );
+  return result.data.pages.nodes.find((p) => p.handle === handle) || null;
+}
+
+// Needs write_content (or write_online_store_pages).
+async function updatePageBody(id, body) {
+  const result = await shopifyGraphQL(
+    `mutation UpdateLabPage($id: ID!, $page: PageUpdateInput!) {
+      pageUpdate(id: $id, page: $page) {
+        page { id handle }
+        userErrors { field message code }
+      }
+    }`,
+    { id, page: { body } },
+    { apiVersion: INVENTORY_API_VERSION }
+  );
+  const { userErrors } = result.data.pageUpdate;
+  if (userErrors && userErrors.length > 0) {
+    throw new Error(`Shopify pageUpdate failed: ${JSON.stringify(userErrors)}`);
+  }
+}
+
 // --- Generate Account Activation URL ---
 
 async function generateAccountActivationUrl(shopifyCustomerId) {
@@ -276,6 +308,8 @@ module.exports = {
   fetchOrderById,
   listVariantInventory,
   setAvailableQuantities,
+  getPageByHandle,
+  updatePageBody,
   markOrderAsPaid,
   addOrderNote,
   verifyWebhookSignature,

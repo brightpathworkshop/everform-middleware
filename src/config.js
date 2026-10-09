@@ -18,6 +18,9 @@ module.exports = {
   // LEGACY slot falls back to unsuffixed SQUARE_ACCESS_TOKEN etc. so the
   // pre-migration Railway config keeps working without changes.
 
+  // Public address of the portal, used for COA links on the store.
+  portalBaseUrl: (process.env.PORTAL_BASE_URL || 'https://membership.everformlife.com').replace(/\/$/, ''),
+
   database: {
     url: process.env.DATABASE_URL,
   },

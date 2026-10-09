@@ -2,6 +2,7 @@ const pool = require('../db/pool');
 const config = require('../config');
 const shopify = require('./shopify');
 const pipeline = require('./pipelineLog');
+const labReports = require('./labReports');
 
 // How long an unpaid invoice keeps its claim on stock.
 const RESERVE_DAYS = 14;
@@ -115,6 +116,9 @@ async function syncShopifyInventory({ reason = 'manual' } = {}) {
         : `Shopify already matches portal stock (${reason})`,
     payload: result,
   });
+  // A lot that just sold out moves from current to previous on the public
+  // Lab Reports page. Only writes when the page would actually change.
+  await labReports.syncQuietly({ reason });
   return result;
 }
 
