@@ -76,30 +76,39 @@ router.get('/callback', async (req, res) => {
 
     const { access_token } = await tokenRes.json();
 
-    // Store the token in the database for reference
+    // The token is shown ONCE, here, to whoever completed the install, and is
+    // never persisted by us. It is deliberately not logged and not written to
+    // the database: both are durable, shared stores that outlive the install,
+    // and a credential sitting in either is a credential waiting to leak.
+    // Record only that an install happened, so an unexplained re-install is
+    // still auditable without keeping the secret around.
     await pool.query(`
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL,
-        updated_at TIMESTAMPTZ DEFAULT NOW()
+      CREATE TABLE IF NOT EXISTS app_install_log (
+        id BIGSERIAL PRIMARY KEY,
+        shop TEXT NOT NULL,
+        installed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        source_ip TEXT
       )
     `);
-    await pool.query(`
-      INSERT INTO settings (key, value, updated_at) VALUES ('shopify_access_token', $1, NOW())
-      ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()
-    `, [access_token]);
+    await pool.query(
+      `INSERT INTO app_install_log (shop, source_ip) VALUES ($1, $2)`,
+      [shop, req.headers['x-forwarded-for'] || req.ip || null]
+    );
 
-    console.log(`[Shopify Auth] App installed successfully! Access token stored in DB.`);
-    console.log(`[Shopify Auth] TOKEN: ${access_token}`);
-    console.log(`[Shopify Auth] Add this to Railway as SHOPIFY_ADMIN_API_TOKEN`);
+    console.log(`[Shopify Auth] App installed on ${shop}. Token issued, not logged.`);
 
     res.send(`
       <html>
         <body style="font-family: sans-serif; max-width: 600px; margin: 40px auto; padding: 20px;">
           <h1>Everform Middleware Installed!</h1>
           <p>The app has been installed on <strong>${shop}</strong>.</p>
-          <p>Your access token has been saved. Check your Railway logs for the token value, then add it as <code>SHOPIFY_ADMIN_API_TOKEN</code> in your Railway environment variables.</p>
-          <p>You can close this window.</p>
+          <p><strong>Copy this access token now. It is shown once and is not stored anywhere.</strong></p>
+          <pre style="background:#f4f1ea;border:1px solid #ccc;padding:12px;word-break:break-all;white-space:pre-wrap;">${access_token}</pre>
+          <p>Set it as <code>SHOPIFY_ADMIN_API_TOKEN</code> in <strong>both</strong> Railway (middleware) and
+          Netlify (portal). The portal uses the same token for customer creation and activation URLs, so
+          updating only one will break onboarding.</p>
+          <p>If you did not start this install, treat the token as compromised: uninstall the app in Shopify
+          and rotate immediately.</p>
         </body>
       </html>
     `);
