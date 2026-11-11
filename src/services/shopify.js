@@ -8,6 +8,11 @@ const GRAPHQL_URL = `https://${config.shopify.storeUrl}/admin/api/2025-01/graphq
 // Inventory calls pin a newer version: inventorySetQuantities changed shape
 // (the @idempotent directive is required from 2026-04 on).
 const INVENTORY_API_VERSION = '2026-10';
+// Version for fetchOrderContactSnapshot. Kept off the module default because
+// the customer SMS-consent field is in a different place on 2025-01, and this
+// is the version the query is verified against. Anything added to that query
+// must be checked on THIS version, not whatever a schema tool defaults to.
+const CONTACT_API_VERSION = '2026-10';
 
 async function shopifyFetch(endpoint, options = {}) {
   const url = `${REST_URL}${endpoint}`;
@@ -240,9 +245,14 @@ async function fetchOrderById(shopifyOrderId) {
 // markOrderAsPaid runs. Read at order-create they'd both be short by the
 // order that just came in; read right after markOrderAsPaid they're current.
 //
-// Note the deprecation dance on the consent field: Customer.smsMarketingConsent
-// now lives under defaultPhoneNumber.smsMarketingConsent. Validated against
-// the live shop on 2026-11-10.
+// Pinned to CONTACT_API_VERSION rather than the module default. The SMS
+// consent field moved between versions — it sits at
+// Customer.smsMarketingConsent on 2025-01 and under
+// defaultPhoneNumber.smsMarketingConsent from 2026-10 — and this exact query
+// is verified working against the live shop on 2026-10. Running it on the
+// module's 2025-01 default throws "Field 'smsMarketingConsent' doesn't exist
+// on type 'CustomerPhoneNumber'", which is how it shipped broken the first
+// time: it was validated against a newer schema than the code called.
 async function fetchOrderContactSnapshot(shopifyOrderId) {
   const data = await shopifyGraphQL(
     `query OrderContactSnapshot($id: ID!) {
@@ -265,7 +275,8 @@ async function fetchOrderContactSnapshot(shopifyOrderId) {
          }
        }
      }`,
-    { id: `gid://shopify/Order/${shopifyOrderId}` }
+    { id: `gid://shopify/Order/${shopifyOrderId}` },
+    { apiVersion: CONTACT_API_VERSION }
   );
   const order = data?.data?.order;
   if (!order) return null;
