@@ -5,6 +5,7 @@ const rawBodyMiddleware = require('./middleware/rawBody');
 const shopifyAuth = require('./routes/shopifyAuth');
 const shopifyWebhook = require('./routes/shopifyWebhook');
 const shopifyCustomerWebhook = require('./routes/shopifyCustomerWebhook');
+const shopifyFulfillmentWebhook = require('./routes/shopifyFulfillmentWebhook');
 const squareWebhook = require('./routes/squareWebhook');
 const jobs = require('./routes/jobs');
 const pool = require('./db/pool');
@@ -30,6 +31,7 @@ app.use('/auth', shopifyAuth);
 // Webhook routes
 app.use(shopifyWebhook);
 app.use(shopifyCustomerWebhook);
+app.use(shopifyFulfillmentWebhook);
 app.use(squareWebhook);
 
 // Admin-triggered jobs (reprocess stuck orders etc.). Auth via shared
@@ -103,6 +105,25 @@ app.listen(config.port, async () => {
       -- changing, so a second push is a second text to a real customer.
       -- NULL means "not pushed"; the claim is taken atomically.
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS ghl_invoice_pushed_at TIMESTAMPTZ;
+      -- One row per tracking number we have pushed to GHL. The GHL workflow
+      -- that sends the tracking iMessage triggers on the tracking-number
+      -- field changing, so this is what stops a customer being texted twice
+      -- about the same parcel.
+      --
+      -- A ledger rather than a column on orders, because one order
+      -- legitimately has several tracking numbers over its life: a split
+      -- shipment, or a reshipped lost package. Each distinct number should
+      -- text exactly once, and "last number pushed" can't express that.
+      CREATE TABLE IF NOT EXISTS ghl_tracking_pushes (
+        id BIGSERIAL PRIMARY KEY,
+        shopify_order_id TEXT NOT NULL,
+        tracking_number TEXT NOT NULL,
+        pushed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (shopify_order_id, tracking_number)
+      );
+      CREATE INDEX IF NOT EXISTS idx_tracking_pushes_order
+        ON ghl_tracking_pushes(shopify_order_id);
+
       CREATE INDEX IF NOT EXISTS idx_orders_shopify_id ON orders(shopify_order_id);
       CREATE INDEX IF NOT EXISTS idx_orders_square_invoice ON orders(square_invoice_id);
       CREATE INDEX IF NOT EXISTS idx_orders_referral_id ON orders(referral_id) WHERE referral_id IS NOT NULL;

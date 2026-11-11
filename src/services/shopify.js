@@ -186,6 +186,43 @@ function parseOrderPayload(payload) {
   };
 }
 
+// Pull carrier, tracking number and tracking URL out of a fulfillments/create
+// or fulfillments/update webhook payload.
+//
+// Shopify sends both singular fields and arrays (`tracking_number` plus
+// `tracking_numbers`), and which are populated varies — the singular field is
+// the first element when there are several. Read singular first, fall back to
+// the arrays.
+//
+// Carrier arrives branded, e.g. "UPS®" rather than "UPS". That is passed
+// through unchanged: the Zapier Zap this replaces did the same, so the
+// existing iMessage copy already renders whatever Shopify sends, and quietly
+// rewriting it here would change what customers read.
+function parseFulfillmentPayload(payload) {
+  const number =
+    payload.tracking_number ||
+    (Array.isArray(payload.tracking_numbers) ? payload.tracking_numbers[0] : null) ||
+    '';
+  const url =
+    payload.tracking_url ||
+    (Array.isArray(payload.tracking_urls) ? payload.tracking_urls[0] : null) ||
+    '';
+  return {
+    fulfillmentId: payload.id != null ? String(payload.id) : '',
+    shopifyOrderId: payload.order_id != null ? String(payload.order_id) : '',
+    status: payload.status || null,
+    shipmentStatus: payload.shipment_status || null,
+    carrier: payload.tracking_company || '',
+    trackingNumber: String(number || '').trim(),
+    trackingUrl: String(url || '').trim(),
+    // More than one parcel on a single fulfillment. We text about the first
+    // and log the rest, rather than sending a burst of messages.
+    extraTrackingNumbers: Array.isArray(payload.tracking_numbers)
+      ? payload.tracking_numbers.slice(1).map((n) => String(n).trim()).filter(Boolean)
+      : [],
+  };
+}
+
 // Fetch a Shopify order by id (REST) and return the raw payload so the
 // same parseOrderPayload can be used on both webhook receives and manual
 // reprocess flows.
@@ -347,5 +384,6 @@ module.exports = {
   addOrderNote,
   verifyWebhookSignature,
   parseOrderPayload,
+  parseFulfillmentPayload,
   generateAccountActivationUrl,
 };

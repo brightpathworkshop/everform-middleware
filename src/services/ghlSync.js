@@ -234,4 +234,133 @@ async function pushInvoiceUrl({ order, invoice, keys }) {
   }
 }
 
-module.exports = { syncContact, pushInvoiceUrl, consentTags, configured };
+// Push carrier + tracking number + tracking URL to GHL, which sends the
+// "here's your tracking" iMessage. Replaces the last Zapier Zap.
+//
+// Guarded per tracking number rather than per order, because an order can
+// legitimately gain several over its life — a split shipment, or a reship
+// after a lost parcel — and each distinct parcel should text exactly once.
+// See db.trackingPushes.
+//
+// `contact` carries the identity to upsert against (from the Shopify order,
+// since a fulfillment payload has no customer details).
+//
+// Never throws; alerts on failure.
+async function pushTracking({ shopifyOrderId, orderNumber, contact, fulfillment, keys }) {
+  const { trackingNumber, trackingUrl, carrier } = fulfillment;
+
+  if (!trackingNumber) {
+    // Normal and not an error: a fulfillment is often created before the
+    // shipping label exists, and the tracking number arrives on a later
+    // fulfillments/update. Nothing to say yet.
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_push_no_number',
+      status: 'skipped',
+      message: 'Fulfillment has no tracking number yet — waiting for an update',
+    });
+    return;
+  }
+
+  if (!contact?.email) {
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_push_no_contact',
+      status: 'error',
+      errorMessage: 'No email on the Shopify order — cannot reach a GHL contact',
+    });
+    alertMerchant(
+      'Tracking iMessage not sent',
+      `Order #${orderNumber}: tracking ${trackingNumber} is ready but the Shopify order has no email address, so no GHL contact could be found. Send the tracking number manually.`
+    );
+    return;
+  }
+
+  const claimed = await db.trackingPushes.claim({ shopifyOrderId, trackingNumber });
+  if (!claimed) {
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_push_already_sent',
+      status: 'skipped',
+      message: `Tracking ${trackingNumber} already pushed — not re-sending (would re-text the customer)`,
+    });
+    return;
+  }
+
+  try {
+    const result = await syncContact({
+      name: 'ghl.tracking_push',
+      contact: {
+        email: contact.email,
+        phone: contact.phone,
+        firstName: contact.firstName,
+        lastName: contact.lastName,
+        zip: contact.zip,
+        tags: ['shopify-order-sync', ...consentTags(contact.smsConsentState)],
+      },
+      // One request for all three. The workflow triggers on the tracking
+      // number, so splitting these would fire the message while the carrier
+      // and link were still blank.
+      triggerFields: {
+        order_shipping_carrier: carrier,
+        tracking_number: trackingNumber,
+        tracking_number_url: trackingUrl,
+      },
+    });
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_pushed',
+      message: `Tracking ${trackingNumber} (${carrier || 'no carrier'}) pushed to GHL contact ${result.contact_id} — iMessage triggered`,
+      payload: {
+        contact_id: result.contact_id,
+        tracking_number: trackingNumber,
+        carrier,
+        has_url: Boolean(trackingUrl),
+        extra_tracking_numbers: fulfillment.extraTrackingNumbers || [],
+        unresolved_keys: result.unresolved_keys,
+      },
+    });
+    if (result.unresolved_keys?.length > 0) {
+      alertMerchant(
+        'GHL field missing',
+        `Order #${orderNumber}: these GHL fields could not be resolved and were NOT written: ${result.unresolved_keys.join(
+          ', '
+        )}. Check /api/admin/ghl-fields.`
+      );
+    }
+    if (fulfillment.extraTrackingNumbers?.length > 0) {
+      alertMerchant(
+        'Order shipped in multiple parcels',
+        `Order #${orderNumber} has more than one tracking number on a single fulfillment. The customer was texted ${trackingNumber}; these were not sent: ${fulfillment.extraTrackingNumbers.join(
+          ', '
+        )}. Pass them on manually if the customer needs them.`
+      );
+    }
+  } catch (err) {
+    await db.trackingPushes.release({ shopifyOrderId, trackingNumber });
+    console.error(`[Order #${orderNumber}] GHL tracking push failed:`, err.message);
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_push_failed',
+      status: 'error',
+      errorMessage: err.message,
+    });
+    alertMerchant(
+      'Tracking iMessage not sent',
+      `Order #${orderNumber} (${contact.email}): tracking ${trackingNumber} shipped, but pushing it to GHL failed, so the customer did not get the tracking text. Shopify will still have emailed them. Error: ${err.message}`
+    );
+  }
+}
+
+module.exports = {
+  syncContact,
+  pushInvoiceUrl,
+  pushTracking,
+  consentTags,
+  configured,
+};

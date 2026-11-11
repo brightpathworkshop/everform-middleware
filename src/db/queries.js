@@ -120,6 +120,39 @@ const orders = {
   },
 };
 
+// Guard for the tracking iMessage. The GHL workflow fires on the tracking
+// number changing, so each distinct number must be pushed exactly once.
+const trackingPushes = {
+  // Claim the right to push this tracking number. The unique constraint on
+  // (order, number) does the work: the first caller inserts and gets a row,
+  // every retry conflicts and gets nothing. A different number on the same
+  // order — split shipment, or a reship after a lost parcel — is a different
+  // key, so it claims and texts as it should.
+  //
+  // Returns true if the push is ours to make.
+  async claim({ shopifyOrderId, trackingNumber }) {
+    const { rows } = await pool.query(
+      `INSERT INTO ghl_tracking_pushes (shopify_order_id, tracking_number)
+       VALUES ($1, $2)
+       ON CONFLICT (shopify_order_id, tracking_number) DO NOTHING
+       RETURNING id`,
+      [shopifyOrderId, trackingNumber]
+    );
+    return rows.length > 0;
+  },
+
+  // Give the claim back after a failed push so a later fulfillment update
+  // (or a redelivered webhook) can try again. Without this a transient GHL
+  // outage would permanently suppress the tracking text for that parcel.
+  async release({ shopifyOrderId, trackingNumber }) {
+    await pool.query(
+      `DELETE FROM ghl_tracking_pushes
+        WHERE shopify_order_id = $1 AND tracking_number = $2`,
+      [shopifyOrderId, trackingNumber]
+    );
+  },
+};
+
 const referrals = {
   // Find an open referral attributing this customer to a partner.
   // Prefers shopify_customer_id match; falls back to case-insensitive email.
@@ -511,4 +544,11 @@ const squareWebhookEvents = {
 
 commissions.refundForOrder = refundCommissionsForOrder;
 
-module.exports = { customers, orders, referrals, commissions, squareWebhookEvents };
+module.exports = {
+  customers,
+  orders,
+  trackingPushes,
+  referrals,
+  commissions,
+  squareWebhookEvents,
+};
