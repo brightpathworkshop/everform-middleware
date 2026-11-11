@@ -13,6 +13,8 @@ const INVENTORY_API_VERSION = '2026-10';
 // is the version the query is verified against. Anything added to that query
 // must be checked on THIS version, not whatever a schema tool defaults to.
 const CONTACT_API_VERSION = '2026-10';
+// Business timezone, for filing an order under the right calendar date.
+const ORDER_DATE_TIMEZONE = process.env.ORDER_DATE_TIMEZONE || 'America/Los_Angeles';
 
 async function shopifyFetch(endpoint, options = {}) {
   const url = `${REST_URL}${endpoint}`;
@@ -137,6 +139,28 @@ function verifyWebhookSignature(body, hmacHeader) {
     Buffer.from(digest),
     Buffer.from(hmacHeader)
   );
+}
+
+// Calendar date in the business's own timezone, as YYYY-MM-DD.
+//
+// GHL's last_order_date is a DATE field, so a full ISO timestamp is the wrong
+// shape for it. The timezone is the substantive part though, not the
+// formatting: Shopify timestamps are UTC, and a Pacific evening order carries
+// the NEXT day's UTC date. Order #1398 was placed at 15:16 on 9 Nov Pacific
+// and Shopify records 2026-11-09T23:16:50Z, which is fine — but anything
+// after 4pm Pacific would land on tomorrow's date, so roughly a third of the
+// day's orders would be filed a day late.
+function localCalendarDate(iso, timeZone = ORDER_DATE_TIMEZONE) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  // en-CA formats as YYYY-MM-DD, which is what a DATE field wants.
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d);
 }
 
 // Clean a phone into something GHL can actually dial or text.
@@ -323,6 +347,8 @@ async function fetchOrderContactSnapshot(shopifyOrderId) {
     // `name` is "#1398"; the bare number is what GHL templates show.
     orderNumber: String(order.name || '').replace(/^#/, ''),
     orderDate: order.createdAt || null,
+    // YYYY-MM-DD in the business timezone, for GHL's DATE field.
+    orderDateLocal: localCalendarDate(order.createdAt),
     email: order.email || '',
     // Same precedence as parseOrderPayload, and for the same reason: the
     // shipping address's phone is a delivery contact, not necessarily the

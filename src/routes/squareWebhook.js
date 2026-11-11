@@ -56,7 +56,7 @@ async function syncCustomerCrmFields({ order, keys }) {
       // Plain fields, not trigger fields — these ride along with the upsert
       // in a single request.
       fields: {
-        [k.lastOrderDate]: snap.orderDate,
+        [k.lastOrderDate]: snap.orderDateLocal,
         [k.orderCount]: snap.orderCount,
         [k.totalSpend]: snap.totalSpend,
       },
