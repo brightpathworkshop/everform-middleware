@@ -1,3 +1,14 @@
 node_modules/
+
+# Secrets. .env.example is tracked and documents the required vars.
 .env
+.env.*
+!.env.example
+
+# Local debugging artefacts: Railway log dumps and admin screenshots saved
+# while chasing a bug. Useful at the time, dead weight in history, and the
+# kind of thing that quietly carries a token into a public repo.
 *.log
+Logs/
+
+.DS_Store
