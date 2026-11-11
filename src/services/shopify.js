@@ -168,6 +168,17 @@ function parseOrderPayload(payload) {
     firstName: payload.customer?.first_name || '',
     lastName: payload.customer?.last_name || '',
     phone: payload.shipping_address?.phone || payload.customer?.phone || '',
+    zip: payload.shipping_address?.zip || payload.customer?.default_address?.zip || '',
+    // Marketing SMS consent as Shopify recorded it at checkout. Read from the
+    // payload rather than fetched, so this stays empty until SMS consent is
+    // actually enabled at checkout and starts populating on its own.
+    //
+    // This does NOT gate the invoice or tracking messages: those are
+    // transactional, and the customer handed over the number to get a
+    // shipment. It decides whether an order-created GHL contact is eligible
+    // for promotional sends, so the promo list can't quietly fill up with
+    // people who never opted in.
+    smsConsentState: payload.customer?.sms_marketing_consent?.state || null,
     subtotal,
     shipping: shippingTotal,
     total,
@@ -181,6 +192,61 @@ function parseOrderPayload(payload) {
 async function fetchOrderById(shopifyOrderId) {
   const data = await shopifyFetch(`/orders/${shopifyOrderId}.json`);
   return data.order;
+}
+
+// Everything the GHL CRM sync needs about an order and its customer, in one
+// call: contact details plus Shopify's own lifetime aggregates.
+//
+// Called at PAYMENT time, not order-create time, and that matters.
+// `amountSpent` and `numberOfOrders` count what Shopify considers paid, and
+// our orders sit unpaid in Shopify until the Square invoice clears and
+// markOrderAsPaid runs. Read at order-create they'd both be short by the
+// order that just came in; read right after markOrderAsPaid they're current.
+//
+// Note the deprecation dance on the consent field: Customer.smsMarketingConsent
+// now lives under defaultPhoneNumber.smsMarketingConsent. Validated against
+// the live shop on 2026-11-10.
+async function fetchOrderContactSnapshot(shopifyOrderId) {
+  const data = await shopifyGraphQL(
+    `query OrderContactSnapshot($id: ID!) {
+       order(id: $id) {
+         name
+         createdAt
+         email
+         phone
+         shippingAddress { zip firstName lastName phone }
+         customer {
+           id
+           firstName
+           lastName
+           numberOfOrders
+           amountSpent { amount }
+           defaultPhoneNumber {
+             phoneNumber
+             smsMarketingConsent { state collectedFrom }
+           }
+         }
+       }
+     }`,
+    { id: `gid://shopify/Order/${shopifyOrderId}` }
+  );
+  const order = data?.data?.order;
+  if (!order) return null;
+  const customer = order.customer || {};
+  const ship = order.shippingAddress || {};
+  return {
+    // `name` is "#1398"; the bare number is what GHL templates show.
+    orderNumber: String(order.name || '').replace(/^#/, ''),
+    orderDate: order.createdAt || null,
+    email: order.email || '',
+    phone: ship.phone || order.phone || customer.defaultPhoneNumber?.phoneNumber || '',
+    firstName: customer.firstName || ship.firstName || '',
+    lastName: customer.lastName || ship.lastName || '',
+    zip: ship.zip || '',
+    orderCount: customer.numberOfOrders != null ? String(customer.numberOfOrders) : null,
+    totalSpend: customer.amountSpent?.amount != null ? String(customer.amountSpent.amount) : null,
+    smsConsentState: customer.defaultPhoneNumber?.smsMarketingConsent?.state || null,
+  };
 }
 
 // --- Inventory ---
@@ -274,6 +340,7 @@ async function generateAccountActivationUrl(shopifyCustomerId) {
 
 module.exports = {
   fetchOrderById,
+  fetchOrderContactSnapshot,
   listVariantInventory,
   setAvailableQuantities,
   markOrderAsPaid,

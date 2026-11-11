@@ -94,6 +94,15 @@ app.listen(config.port, async () => {
       );
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS product_subtotal NUMERIC(10, 2);
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS referral_id UUID;
+      -- Square's hosted invoice page. We already have this at publish time
+      -- (publishInvoice returns it) and it's what the customer taps in the
+      -- invoice iMessage. Also doubles as the record of what we sent.
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS square_invoice_url TEXT;
+      -- Set once, when the invoice URL has been pushed to GHL. The GHL
+      -- workflow that sends the invoice iMessage triggers on that field
+      -- changing, so a second push is a second text to a real customer.
+      -- NULL means "not pushed"; the claim is taken atomically.
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS ghl_invoice_pushed_at TIMESTAMPTZ;
       CREATE INDEX IF NOT EXISTS idx_orders_shopify_id ON orders(shopify_order_id);
       CREATE INDEX IF NOT EXISTS idx_orders_square_invoice ON orders(square_invoice_id);
       CREATE INDEX IF NOT EXISTS idx_orders_referral_id ON orders(referral_id) WHERE referral_id IS NOT NULL;

@@ -5,6 +5,7 @@ const db = require('../db/queries');
 const { alertMerchant } = require('../services/alerts');
 const pipeline = require('../services/pipelineLog');
 const inventorySync = require('../services/inventorySync');
+const ghlSync = require('../services/ghlSync');
 
 const router = express.Router();
 
@@ -155,7 +156,11 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
         })
     );
 
-    await db.orders.updateInvoice(order.shopifyOrderId, invoice.id);
+    await db.orders.updateInvoice(
+      order.shopifyOrderId,
+      invoice.id,
+      invoice.publicUrl || null
+    );
     await pipeline.log({
       ...keys,
       squareInvoiceId: invoice.id,
@@ -170,6 +175,11 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       },
     });
     console.log(`[Order #${order.shopifyOrderNumber}] Invoice ${invoice.id} sent`);
+
+    // 8. Hand the invoice to GHL, which texts the customer the payment link.
+    // Also creates the GHL contact if this customer never went through the
+    // join flow. Never throws; alerts on failure.
+    await ghlSync.pushInvoiceUrl({ order, invoice, keys });
 
     // Shopify has lowered the listing that was bought; lower the other
     // listings that draw on the same vials. Never throws.

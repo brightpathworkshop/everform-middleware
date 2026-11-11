@@ -5,6 +5,7 @@ const db = require('../db/queries');
 const pipeline = require('../services/pipelineLog');
 const { alertMerchant } = require('../services/alerts');
 const inventorySync = require('../services/inventorySync');
+const ghlSync = require('../services/ghlSync');
 
 const router = express.Router();
 
@@ -128,7 +129,11 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
         })
     );
 
-    await db.orders.updateInvoice(order.shopifyOrderId, invoice.id);
+    await db.orders.updateInvoice(
+      order.shopifyOrderId,
+      invoice.id,
+      invoice.publicUrl || null
+    );
     await pipeline.log({
       ...keys,
       squareInvoiceId: invoice.id,
@@ -142,6 +147,11 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
         account_slot: account?.env_var_slot,
       },
     });
+
+    // Same GHL push as the live webhook path. Without this a reprocessed
+    // order gets its Square invoice but the customer never gets the text —
+    // which is precisely the situation this button exists to rescue.
+    await ghlSync.pushInvoiceUrl({ order, invoice, keys });
 
     return res.json({
       ok: true,

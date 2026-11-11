@@ -62,10 +62,46 @@ const orders = {
     return rows[0] || null;
   },
 
-  async updateInvoice(shopifyOrderId, squareInvoiceId) {
+  async updateInvoice(shopifyOrderId, squareInvoiceId, squareInvoiceUrl = null) {
     await pool.query(
-      `UPDATE orders SET square_invoice_id = $1, status = 'invoiced' WHERE shopify_order_id = $2`,
-      [squareInvoiceId, shopifyOrderId]
+      `UPDATE orders
+          SET square_invoice_id = $1,
+              square_invoice_url = COALESCE($2, square_invoice_url),
+              status = 'invoiced'
+        WHERE shopify_order_id = $3`,
+      [squareInvoiceId, squareInvoiceUrl, shopifyOrderId]
+    );
+  },
+
+  // Take the exclusive right to push this order's invoice URL to GHL.
+  //
+  // The GHL workflow that sends the invoice iMessage triggers on the invoice
+  // URL field changing, so pushing twice texts the customer twice. The guard
+  // has to hold against sequential retries (the webhook handler re-running, a
+  // manual reprocess) and against two handlers racing, so the claim is a
+  // single conditional UPDATE: only the caller that flips NULL → NOW() gets a
+  // row back, and only that caller pushes.
+  //
+  // Returns true if the claim is ours, false if someone already pushed.
+  async claimGhlInvoicePush(shopifyOrderId) {
+    const { rows } = await pool.query(
+      `UPDATE orders
+          SET ghl_invoice_pushed_at = NOW()
+        WHERE shopify_order_id = $1
+          AND ghl_invoice_pushed_at IS NULL
+        RETURNING id`,
+      [shopifyOrderId]
+    );
+    return rows.length > 0;
+  },
+
+  // Hand the claim back after a failed push, so a reprocess can try again.
+  // Without this a transient GHL outage would permanently mark the order as
+  // "invoice sent" and the customer would never get the message.
+  async releaseGhlInvoicePush(shopifyOrderId) {
+    await pool.query(
+      `UPDATE orders SET ghl_invoice_pushed_at = NULL WHERE shopify_order_id = $1`,
+      [shopifyOrderId]
     );
   },
 
