@@ -103,6 +103,19 @@ async function syncContact({ contact, fields, triggerFields, name = 'ghl.sync' }
   }
 }
 
+// A GHL contact with no phone number still accepts the field write, the
+// workflow still fires, and the message is delivered to nobody — there is no
+// bounce and nothing in any log to notice. About one order in fifty arrives
+// with no usable phone on the order, the customer record, or the shipping
+// address, so this turns a silent non-delivery into something actionable.
+function warnIfUntextable({ phone, orderNumber, email, what }) {
+  if (phone) return;
+  alertMerchant(
+    `${what} can't be texted — no phone number`,
+    `Order #${orderNumber} (${email || 'no email'}) has no phone number on the order, the customer record, or the shipping address, so the ${what.toLowerCase()} iMessage has nowhere to go.\n\nThe GHL fields were still written, so the record is complete — but reach the customer by email instead.`
+  );
+}
+
 // Shopify reports SMS marketing consent as lowercase "subscribed" on REST
 // webhook payloads and uppercase "SUBSCRIBED" on GraphQL. Both reach this
 // code from different paths, so neither spelling is wrong — compare folded.
@@ -211,6 +224,12 @@ async function pushInvoiceUrl({ order, invoice, keys }) {
         )}. Check /api/admin/ghl-fields.`
       );
     }
+    warnIfUntextable({
+      phone: order.phone,
+      orderNumber: order.shopifyOrderNumber,
+      email: order.email,
+      what: 'Invoice',
+    });
   } catch (err) {
     // Hand the claim back so a reprocess can retry — otherwise a transient
     // GHL outage would leave this order permanently marked as sent.
@@ -367,6 +386,12 @@ async function pushTracking({ shopifyOrderId, orderNumber, contact, fulfillment,
         )}. Check /api/admin/ghl-fields.`
       );
     }
+    warnIfUntextable({
+      phone: contact.phone,
+      orderNumber,
+      email: contact.email,
+      what: 'Tracking',
+    });
     if (fulfillment.extraTrackingNumbers?.length > 0) {
       alertMerchant(
         'Order shipped in multiple parcels',

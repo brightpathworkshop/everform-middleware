@@ -139,6 +139,34 @@ function verifyWebhookSignature(body, hmacHeader) {
   );
 }
 
+// Clean a phone into something GHL can actually dial or text.
+//
+// Shopify stores whatever the customer typed, and the data is messier than it
+// looks: order #1366 carries "+1+14157226710" (a doubled country code) and
+// several orders carry an empty string rather than null. A malformed number
+// reaches GHL, gets stored, and then silently fails to deliver — there is no
+// bounce to notice.
+//
+// US/Canada only, which is the whole customer base: ten digits gets a +1,
+// eleven starting with 1 gets a bare +. Anything else passes through
+// untouched rather than being mangled into a different number — better a
+// number we didn't improve than one we broke.
+function normalizePhoneForMessaging(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return '';
+  // Peel repeated leading country codes until ten digits are left. This is
+  // what rescues "+1+14157226710" (order #1366) without assuming anything:
+  // only a leading 1 is ever dropped, and only while the number is still
+  // longer than a bare US subscriber number.
+  let d = s.replace(/\D/g, '');
+  while (d.length > 10 && d.startsWith('1')) d = d.slice(1);
+  if (d.length === 10) return `+1${d}`;
+  // Anything else — a genuine international number, or something too mangled
+  // to reason about — passes through untouched. Better a number we didn't
+  // improve than one we quietly turned into somebody else's.
+  return s;
+}
+
 // --- Parse Order Data ---
 
 function parseOrderPayload(payload) {
@@ -172,7 +200,16 @@ function parseOrderPayload(payload) {
     email: payload.contact_email || payload.customer?.email || '',
     firstName: payload.customer?.first_name || '',
     lastName: payload.customer?.last_name || '',
-    phone: payload.shipping_address?.phone || payload.customer?.phone || '',
+    // Precedence matters, and it is NOT the shipping label's order. The
+    // customer's own number comes first, then the number they typed at
+    // checkout, and the shipping address only as a last resort: a delivery
+    // phone is routinely a workplace, a gift recipient, or a business line.
+    // Order #1397 shipped to a toll-free +1800 number while the customer's
+    // own mobile sat on the customer record — texting the former reaches
+    // nobody.
+    phone: normalizePhoneForMessaging(
+      payload.customer?.phone || payload.phone || payload.shipping_address?.phone
+    ),
     zip: payload.shipping_address?.zip || payload.customer?.default_address?.zip || '',
     // Marketing SMS consent as Shopify recorded it at checkout. Read from the
     // payload rather than fetched, so this stays empty until SMS consent is
@@ -287,7 +324,12 @@ async function fetchOrderContactSnapshot(shopifyOrderId) {
     orderNumber: String(order.name || '').replace(/^#/, ''),
     orderDate: order.createdAt || null,
     email: order.email || '',
-    phone: ship.phone || order.phone || customer.defaultPhoneNumber?.phoneNumber || '',
+    // Same precedence as parseOrderPayload, and for the same reason: the
+    // shipping address's phone is a delivery contact, not necessarily the
+    // customer's own line.
+    phone: normalizePhoneForMessaging(
+      customer.defaultPhoneNumber?.phoneNumber || order.phone || ship.phone
+    ),
     firstName: customer.firstName || ship.firstName || '',
     lastName: customer.lastName || ship.lastName || '',
     zip: ship.zip || '',
