@@ -1,7 +1,7 @@
 const express = require('express');
 const shopify = require('../services/shopify');
-const db = require('../db/queries');
 const pipeline = require('../services/pipelineLog');
+const refundSync = require('../services/refundSync');
 const { alertMerchant } = require('../services/alerts');
 
 const router = express.Router();
@@ -14,11 +14,16 @@ const router = express.Router();
 // return never reduced what a partner was owed — across every commission ever
 // written, refund_adjustment was zero on every row.
 //
-// The refunded fraction is computed from the refund's own line items rather
-// than from the order total, because commission is earned on product subtotal
-// and a refund frequently covers shipping, tax, or a restocking difference
-// that the partner was never paid on. A shipping-only refund comes out at 0%
-// and correctly changes nothing.
+// This handler deliberately does almost nothing itself: it verifies the
+// signature and hands off to refundSync, which re-reads the order's whole
+// refund history from Shopify and recomputes. The event is a TRIGGER TO
+// RE-SYNC, not a carrier of the delta.
+//
+// That distinction is the whole point. A return is routinely recorded as two
+// refunds — a restock carrying the line items but no money, then a payout
+// carrying the money but no line items — so this payload's own line items are
+// $0 on the half that moves the money. Order #1381 ($108 returned as store
+// credit) reversed nothing at all under the old per-payload arithmetic.
 router.post('/webhooks/shopify/refunds', async (req, res) => {
   const hmac = req.headers['x-shopify-hmac-sha256'];
   if (!hmac || !shopify.verifyWebhookSignature(req.rawBody, hmac)) {
@@ -35,114 +40,16 @@ router.post('/webhooks/shopify/refunds', async (req, res) => {
     return;
   }
 
-  const keys = { shopifyOrderId };
-
   try {
-    const orderRow = await db.orders.findByShopifyOrderId(shopifyOrderId);
-    if (!orderRow) {
-      await pipeline.log({
-        ...keys,
-        category: 'shopify_webhook',
-        eventName: 'refund.unknown_order',
-        status: 'skipped',
-        message: 'refunds/create for an order not in our DB — ignoring',
-      });
-      return;
-    }
-
-    keys.orderId = orderRow.id;
-    keys.shopifyOrderNumber = orderRow.shopify_order_number;
-
-    // Product dollars coming back on THIS refund.
-    const lineItems = Array.isArray(payload.refund_line_items)
-      ? payload.refund_line_items
-      : [];
-    const refundedProduct = lineItems.reduce(
-      (s, li) => s + Number(li.subtotal || 0),
-      0
-    );
-
-    // Commission base for the order, as we recorded it at order time.
-    const orderSubtotal = Number(orderRow.product_subtotal || 0);
-
-    if (!(orderSubtotal > 0)) {
-      await pipeline.log({
-        ...keys,
-        category: 'commission',
-        eventName: 'refund.no_commission_base',
-        status: 'skipped',
-        message: `Order has no product subtotal recorded — nothing to reverse`,
-      });
-      return;
-    }
-
-    if (!(refundedProduct > 0)) {
-      await pipeline.log({
-        ...keys,
-        category: 'commission',
-        eventName: 'refund.non_product',
-        status: 'skipped',
-        message:
-          'Refund covered no product lines (shipping/tax/adjustment only) — commission unchanged',
-        payload: { refund_id: payload.id, order_subtotal: orderSubtotal },
-      });
-      return;
-    }
-
-    // Refunds accumulate: Shopify sends one event per refund, so a second
-    // partial refund must reverse against the order's total refunded product
-    // to date rather than only its own share. refundForOrder takes a target
-    // fraction and tops up to it, so pass the cumulative figure.
-    const alreadyRefunded = await db.orders.refundedProductToDate(shopifyOrderId);
-    const cumulative = alreadyRefunded + refundedProduct;
-    const fraction = Math.min(1, cumulative / orderSubtotal);
-
-    const result = await db.commissions.refundForOrder({
+    await refundSync.reconcileRefundsForOrder({
       shopifyOrderId,
-      refundFraction: fraction,
+      refundId: payload.id ?? null,
+      source: 'webhook',
     });
-
-    await db.orders.recordRefundedProduct(shopifyOrderId, cumulative);
-
-    const summary =
-      `Reversed at ${(fraction * 100).toFixed(0)}% of product subtotal · ` +
-      `${result.direct} direct + ${result.overrides} override rows adjusted in place, ` +
-      `${result.carried_forward} carried forward from closed periods`;
-
-    console.log(`[Shopify Refund] Order #${orderRow.shopify_order_number}: ${summary}`);
-    await pipeline.log({
-      ...keys,
-      category: 'commission',
-      eventName: 'commission.refunded',
-      message: summary,
-      payload: {
-        refund_id: payload.id,
-        refunded_product_this_event: refundedProduct,
-        refunded_product_cumulative: cumulative,
-        order_subtotal: orderSubtotal,
-        fraction,
-        ...result,
-      },
-    });
-
-    // A carried-forward reversal changes a partner's balance in a period they
-    // are not expecting it, so it is worth knowing about rather than only
-    // sitting in a log.
-    if (result.carried_forward > 0) {
-      alertMerchant(
-        'Commission reversal carried forward',
-        `Order #${orderRow.shopify_order_number} was refunded (${(fraction * 100).toFixed(
-          0
-        )}% of product subtotal), but ${result.carried_forward} commission row(s) sat in a statement period that is already closed.\n\nThose periods were left untouched. The reversal has been applied against the current open period instead, and will show on the partner's next statement as a refund adjustment.`
-      );
-    }
   } catch (err) {
-    console.error(
-      `[Shopify Refund] Order ${shopifyOrderId} failed:`,
-      err.message
-    );
+    console.error(`[Shopify Refund] Order ${shopifyOrderId} failed:`, err.message);
     await pipeline.log({
-      ...keys,
+      shopifyOrderId,
       category: 'commission',
       eventName: 'refund.processing_failed',
       status: 'error',

@@ -13,6 +13,9 @@ const INVENTORY_API_VERSION = '2026-10';
 // is the version the query is verified against. Anything added to that query
 // must be checked on THIS version, not whatever a schema tool defaults to.
 const CONTACT_API_VERSION = '2026-10';
+// Version for fetchRefundedProductSubtotal. Pinned, and verified by running
+// the query against the live store — not against a schema tool's default.
+const REFUND_API_VERSION = '2026-10';
 // Business timezone, for filing an order under the right calendar date.
 const ORDER_DATE_TIMEZONE = process.env.ORDER_DATE_TIMEZONE || 'America/Los_Angeles';
 
@@ -454,9 +457,77 @@ async function generateAccountActivationUrl(shopifyCustomerId) {
   return accountActivationUrl;
 }
 
+// Total product dollars refunded across EVERY refund on an order.
+//
+// Re-derived from Shopify rather than accumulated out of webhook payloads,
+// because a return is routinely recorded as TWO refunds and neither one is
+// usable on its own:
+//
+//   1. a restock carrying the line items but no money, then
+//   2. a payout — card or store credit — carrying the money but no line
+//      items, because the first refund already consumed them.
+//
+// Summing one refunds/create event's line items therefore sees $0 on the
+// payout half and calls it a shipping-only refund. That is exactly how
+// order #1381 ($108 returned to store credit) reversed nothing at all.
+//
+// Reading the whole history instead also makes the handler self-healing: a
+// refund that happened while the webhook subscription did not yet exist is
+// picked up by the next event on that order, rather than being lost.
+//
+// Summing line-item subtotals gives the commission policy for free. Shipping
+// and tax refunds carry no line items, so they never reduce commission —
+// correct, because commission was never paid on shipping or tax. A pure cash
+// refund that was never attached to line items likewise does not reverse
+// anything: the goods did not come back, so that is a post-hoc discount, not
+// a return.
+async function fetchRefundedProductSubtotal(shopifyOrderId) {
+  const body = await shopifyGraphQL(
+    `query OrderRefundedProduct($id: ID!) {
+       order(id: $id) {
+         refunds(first: 100) {
+           id
+           refundLineItems(first: 100) {
+             pageInfo { hasNextPage }
+             nodes { subtotalSet { shopMoney { amount } } }
+           }
+         }
+       }
+     }`,
+    { id: `gid://shopify/Order/${shopifyOrderId}` },
+    { apiVersion: REFUND_API_VERSION }
+  );
+
+  const order = body?.data?.order;
+  if (!order) {
+    throw new Error(`Order ${shopifyOrderId} not found in Shopify`);
+  }
+
+  let total = 0;
+  for (const refund of order.refunds || []) {
+    const page = refund.refundLineItems;
+    // Refuse to answer rather than undercount. A truncated page would quietly
+    // under-reverse commission and look like a successful reversal in the log,
+    // which is the worst available outcome; throwing routes it to the merchant
+    // alert instead. 100 line items on one refund is far past anything this
+    // catalogue produces, so this should never fire.
+    if (page?.pageInfo?.hasNextPage) {
+      throw new Error(
+        `Refund ${refund.id} on order ${shopifyOrderId} has more than 100 line items — ` +
+          `refusing to compute a refunded subtotal from a truncated page`
+      );
+    }
+    for (const li of page?.nodes || []) {
+      total += Number(li.subtotalSet?.shopMoney?.amount || 0);
+    }
+  }
+  return Math.round(total * 100) / 100;
+}
+
 module.exports = {
   fetchOrderById,
   fetchOrderContactSnapshot,
+  fetchRefundedProductSubtotal,
   listVariantInventory,
   setAvailableQuantities,
   markOrderAsPaid,

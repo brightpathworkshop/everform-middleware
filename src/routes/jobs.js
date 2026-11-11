@@ -6,6 +6,7 @@ const pipeline = require('../services/pipelineLog');
 const { alertMerchant } = require('../services/alerts');
 const inventorySync = require('../services/inventorySync');
 const ghlSync = require('../services/ghlSync');
+const refundSync = require('../services/refundSync');
 
 const router = express.Router();
 
@@ -189,6 +190,41 @@ router.post('/jobs/sync-inventory', requireJobSecret, async (req, res) => {
       eventName: 'inventory.shopify_sync_failed',
       status: 'error',
       errorMessage: err.message,
+    });
+    res.status(502).json({ ok: false, error: err.message });
+  }
+});
+
+// Re-reconcile commission against an order's refunds in Shopify.
+//
+// The recovery lever for refunds the webhook never saw or got wrong: a refund
+// issued before the subscription existed, a delivery Shopify dropped, or an
+// order processed by an earlier version of the reversal logic. Safe to run on
+// any order at any time — it recomputes a target from Shopify's own refund
+// history rather than applying a delta, so repeated runs converge instead of
+// stacking.
+//
+// Body: { shopify_order_id: string }
+router.post('/jobs/resync-refunds', requireJobSecret, async (req, res) => {
+  const shopifyOrderId = String(req.body?.shopify_order_id || '').trim();
+  if (!shopifyOrderId) {
+    return res.status(400).json({ ok: false, error: 'Missing shopify_order_id' });
+  }
+
+  try {
+    const result = await refundSync.reconcileRefundsForOrder({
+      shopifyOrderId,
+      source: 'manual_resync',
+    });
+    res.json(result);
+  } catch (err) {
+    console.error('[jobs] resync-refunds failed:', err.message);
+    await pipeline.log({
+      shopifyOrderId,
+      category: 'commission',
+      eventName: 'refund.processing_failed',
+      status: 'error',
+      errorMessage: `manual resync: ${err.message}`,
     });
     res.status(502).json({ ok: false, error: err.message });
   }
