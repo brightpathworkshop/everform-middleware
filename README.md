@@ -34,7 +34,11 @@ SQUARE_ENVIRONMENT=sandbox
 SQUARE_WEBHOOK_SIGNATURE_KEY=xxxxx
 ```
 
-6. Deploy. Railway gives you a public URL like `everform-middleware-production-xxxx.up.railway.app`
+6. Deploy. Railway gives the service a public URL — check it with `railway domain`
+   (or Settings → Networking). For this project ("Everform Life Middleware",
+   environment `production`, service `web`) it is
+   `https://web-production-28556.up.railway.app`, and the webhook URLs below
+   assume that host.
 
 ### 3. Shopify
 
@@ -43,7 +47,7 @@ SQUARE_WEBHOOK_SIGNATURE_KEY=xxxxx
 3. Install the app and copy the Admin API access token
 4. Go to Settings → Notifications → Webhooks → Create webhook:
    - Event: `Order creation`
-   - URL: `https://your-railway-url.up.railway.app/webhooks/shopify/orders`
+   - URL: `https://web-production-28556.up.railway.app/webhooks/shopify/orders`
    - Format: JSON
 5. Copy the webhook signing secret
 6. Set checkout to manual payment with message: "You'll receive a payment link via text and email within 60 seconds. Returning members with a card on file will be charged automatically."
@@ -55,8 +59,8 @@ SQUARE_WEBHOOK_SIGNATURE_KEY=xxxxx
 3. Copy: Access Token, Application ID
 4. Get Location ID from Square Dashboard → Locations
 5. Go to Webhooks → Subscribe:
-   - URL: `https://your-railway-url.up.railway.app/webhooks/square/payment`
-   - Events: `invoice.payment_made`
+   - URL: `https://web-production-28556.up.railway.app/webhooks/square`
+   - Events: `invoice.payment_made`, `invoice.refunded`
 6. Copy the webhook signature key
 
 ### 5. Go live
@@ -72,7 +76,10 @@ SQUARE_WEBHOOK_SIGNATURE_KEY=xxxxx
 | GET | `/` | Service status |
 | GET | `/health` | Health check |
 | POST | `/webhooks/shopify/orders` | Shopify order webhook |
-| POST | `/webhooks/square/payment` | Square payment webhook |
+| POST | `/webhooks/shopify/customers` | Shopify customer-create webhook |
+| POST | `/webhooks/square` | Square invoice webhook (payment made / refunded) |
+| POST | `/jobs/reprocess-order` | Re-run a stuck order (portal admin; needs `X-Reprocess-Secret`) |
+| POST | `/jobs/sync-inventory` | Push portal stock to Shopify (needs `X-Reprocess-Secret`) |
 
 ## Architecture
 
