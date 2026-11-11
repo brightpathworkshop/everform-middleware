@@ -2,6 +2,7 @@ const express = require('express');
 const shopify = require('../services/shopify');
 const ghl = require('../services/ghl');
 const { alertMerchant } = require('../services/alerts');
+const config = require('../config');
 
 const router = express.Router();
 
@@ -24,6 +25,21 @@ router.post('/webhooks/shopify/customers', async (req, res) => {
   console.log(`[Customer Webhook] Customer ${customerId} (${email}) — state: ${state}`);
 
   try {
+    // Under new customer accounts there is nothing for this handler to do.
+    // Sign-in is an emailed six-digit code, so no activation URL exists to
+    // mint and no account_setup_url to push — and the state gate below is
+    // meaningless, since "disabled" and "invited" are legacy-only states.
+    //
+    // Minting anyway would produce a link Shopify documents as non-functional
+    // and then push it to GHL, where the welcome automation would text it to
+    // a real customer. Returning early is the correct behaviour, not a stub.
+    if (config.shopify.customerAccounts === 'new') {
+      console.log(
+        `[Customer Webhook] Customer ${customerId} — new customer accounts are enabled, no activation step exists; nothing to do`
+      );
+      return;
+    }
+
     // Only generate activation URL for customers who haven't activated yet.
     // "disabled" = never invited, "invited" = invite sent but not yet accepted.
     // Both are valid states for customerGenerateAccountActivationUrl.

@@ -11,6 +11,17 @@ module.exports = {
     clientSecret: process.env.SHOPIFY_CLIENT_SECRET,
     // Where stock is held. One location today; override if that changes.
     locationId: process.env.SHOPIFY_LOCATION_ID || 'gid://shopify/Location/89919914234',
+    // Which customer-account system the shop runs: 'legacy' or 'new'.
+    // Defaults to legacy so deploying changes nothing until it is set.
+    // Must be flipped in step with the same var on the portal (Netlify) and
+    // with the setting in Shopify itself. See src/lib/env.ts in the portal.
+    // Case- and whitespace-insensitive on purpose: typed by hand into a
+    // Railway field once, and "New" silently meaning "legacy" would look
+    // exactly like the switch not working.
+    customerAccounts:
+      (process.env.SHOPIFY_CUSTOMER_ACCOUNTS || '').trim().toLowerCase() === 'new'
+        ? 'new'
+        : 'legacy',
   },
 
   // Square credentials moved to the multi-tenant square_accounts table.
