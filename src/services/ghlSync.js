@@ -263,6 +263,41 @@ async function pushTracking({ shopifyOrderId, orderNumber, contact, fulfillment,
     return;
   }
 
+  // No tracking URL means no message. Two reasons, and the second is the one
+  // that bites:
+  //
+  //   1. A fulfillment with no tracking link is usually not a parcel at all —
+  //      a local hand-off entered as carrier "Other" with something like
+  //      "special drop off" typed in the tracking field. Texting a customer a
+  //      carrier of "Other" and a tracking number of "special drop off" is
+  //      worse than texting them nothing.
+  //   2. An empty value is dropped rather than written (see resolveFieldKeys
+  //      in the portal: writing blank to a field that drives a workflow
+  //      trigger would fire it with nothing to say). So pushing a number with
+  //      no URL leaves the PREVIOUS url in place — and for a repeat customer
+  //      the message would pair this parcel's number with their last order's
+  //      tracking link.
+  //
+  // Deliberately does not claim the parcel, so if a URL arrives on a later
+  // fulfillments/update the message still goes out then.
+  if (!trackingUrl) {
+    await pipeline.log({
+      ...keys,
+      category: 'ghl_api',
+      eventName: 'ghl.tracking_push_no_url',
+      status: 'skipped',
+      message: `Tracking "${trackingNumber}" (${carrier || 'no carrier'}) has no tracking URL — not texting the customer`,
+      payload: { tracking_number: trackingNumber, carrier },
+    });
+    alertMerchant(
+      'Tracking text skipped — no tracking link',
+      `Order #${orderNumber} was fulfilled with tracking "${trackingNumber}" and carrier "${
+        carrier || 'none'
+      }", but Shopify provided no tracking URL, so no tracking text was sent.\n\nIf this was a local drop-off or hand delivery, that's the intended behaviour and you can ignore this. If it was a real shipment, the customer has not been notified — add the carrier and tracking number so Shopify generates a tracking link, and saving the fulfillment again will send the text.`
+    );
+    return;
+  }
+
   if (!contact?.email) {
     await pipeline.log({
       ...keys,
