@@ -118,6 +118,27 @@ const orders = {
       [status, shopifyOrderId]
     );
   },
+
+  // Product dollars refunded on this order so far, across every refund event
+  // Shopify has sent for it.
+  async refundedProductToDate(shopifyOrderId) {
+    const { rows } = await pool.query(
+      'SELECT refunded_product_subtotal FROM orders WHERE shopify_order_id = $1',
+      [shopifyOrderId]
+    );
+    return Number(rows[0]?.refunded_product_subtotal || 0);
+  },
+
+  // Record the new cumulative figure. GREATEST so a redelivered webhook can
+  // never walk the total backwards and make a reversal look partly undone.
+  async recordRefundedProduct(shopifyOrderId, cumulative) {
+    await pool.query(
+      `UPDATE orders
+          SET refunded_product_subtotal = GREATEST(refunded_product_subtotal, $1::numeric)
+        WHERE shopify_order_id = $2`,
+      [Number(cumulative).toFixed(2), shopifyOrderId]
+    );
+  },
 };
 
 // Guard for the tracking iMessage. The GHL workflow fires on the tracking
@@ -434,61 +455,146 @@ const commissions = {
 // (shopify_order_id, is_override = false); overrides trace back via
 // source_commission_id. Idempotent: an already-refunded row (refund_adjustment
 // >= commission_amount) is untouched.
+// Reverse the commission on a refunded order.
+//
+// UNITS. refund_adjustment is denominated in SUBTOTAL dollars, not commission
+// dollars — the schema says so: net_subtotal is a generated column equal to
+// product_subtotal - refund_adjustment. The previous version of this function
+// mixed the two, writing commission_amount * fraction (commission dollars)
+// into that column whenever the row had been locked, which silently
+// under-reversed: on a fully refunded $500 order at 25%, it removed $125 of
+// subtotal instead of $500, leaving the row reading as if only a quarter of
+// the order came back.
+//
+// OPEN vs LOCKED. A period that is still open is reversed in place: reducing
+// net_subtotal feeds the monthly retroactive tier calculation, so both the
+// tier volume and the commission fall out correctly with no separate
+// arithmetic. A period that is already locked is never touched — reopening it
+// would restate a statement the partner has been paid against — so the
+// reversal is carried forward into the current open period as a
+// commission_adjustments row, in commission dollars, which is the rule
+// Brandon set: carry it forward, don't reopen closed periods.
+//
+// Returns counts of what it did, split by mechanism, so the caller can log
+// which partners had a closed period carried forward.
 async function refundCommissionsForOrder({ shopifyOrderId, refundFraction = 1 }) {
-  const { rows: directRows } = await pool.query(
-    `SELECT id, commission_amount, product_subtotal, refund_adjustment
-       FROM public.commissions
-      WHERE shopify_order_id = $1 AND is_override = false
-      FOR UPDATE`,
-    [shopifyOrderId]
-  );
-  if (directRows.length === 0) return { direct: 0, overrides: 0 };
-  let directUpdated = 0;
-  let overrideUpdated = 0;
-
-  for (const direct of directRows) {
-    // Base amount: the locked commission if we have it, otherwise the
-    // projected commission at the max possible rate the partner could hit
-    // this month. We can't compute the true tier-effective rate here
-    // without the full-month rows; overshooting on the reversal is safer
-    // than undershooting and leaving the partner overpaid.
-    const currentAmount = Number(direct.commission_amount || 0);
-    const currentRefund = Number(direct.refund_adjustment || 0);
-    const base = currentAmount > 0 ? currentAmount : Number(direct.product_subtotal || 0);
-    const targetRefund = Math.min(base, base * refundFraction);
-    if (targetRefund <= currentRefund + 0.005) continue; // already refunded
-    await pool.query(
-      `UPDATE public.commissions
-          SET refund_adjustment = $2
-        WHERE id = $1`,
-      [direct.id, targetRefund.toFixed(2)]
-    );
-    directUpdated += 1;
-
-    // Cascade to overrides that were written off this direct row. Their
-    // commission_amount is locked at write time (flat per-level rate), so
-    // reversal is straightforward.
-    const { rows: overrideRows } = await pool.query(
-      `SELECT id, commission_amount, refund_adjustment
-         FROM public.commissions
-        WHERE source_commission_id = $1`,
-      [direct.id]
-    );
-    for (const ov of overrideRows) {
-      const ovBase = Number(ov.commission_amount || 0);
-      const ovCurrentRefund = Number(ov.refund_adjustment || 0);
-      const ovTarget = Math.min(ovBase, ovBase * refundFraction);
-      if (ovTarget <= ovCurrentRefund + 0.005) continue;
-      await pool.query(
-        `UPDATE public.commissions
-            SET refund_adjustment = $2
-          WHERE id = $1`,
-        [ov.id, ovTarget.toFixed(2)]
-      );
-      overrideUpdated += 1;
-    }
+  const fraction = Math.max(0, Math.min(1, Number(refundFraction) || 0));
+  if (fraction <= 0) {
+    return { direct: 0, overrides: 0, carried_forward: 0, skipped_locked: 0 };
   }
-  return { direct: directUpdated, overrides: overrideUpdated };
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT id, partner_id, is_override, override_level, commission_rate_applied,
+              commission_amount, product_subtotal, refund_adjustment,
+              statement_period, statement_locked_at, shopify_order_number
+         FROM public.commissions
+        WHERE shopify_order_id = $1
+        ORDER BY is_override, override_level NULLS FIRST
+        FOR UPDATE`,
+      [shopifyOrderId]
+    );
+    if (rows.length === 0) {
+      await client.query('COMMIT');
+      return { direct: 0, overrides: 0, carried_forward: 0, skipped_locked: 0 };
+    }
+
+    // The period a carried-forward reversal lands in. If this month later
+    // locks, the adjustment simply becomes part of that locked month, which is
+    // correct — it was earned against it.
+    const openPeriod = new Date().toISOString().slice(0, 7);
+
+    let direct = 0;
+    let overrides = 0;
+    let carriedForward = 0;
+
+    for (const row of rows) {
+      const subtotal = Number(row.product_subtotal || 0);
+      const currentRefund = Number(row.refund_adjustment || 0);
+
+      if (!row.statement_locked_at) {
+        // Still open: reverse in place, in subtotal dollars.
+        const target = Math.min(subtotal, subtotal * fraction);
+        if (target <= currentRefund + 0.005) continue; // already at or past this
+        await client.query(
+          `UPDATE public.commissions SET refund_adjustment = $2 WHERE id = $1`,
+          [row.id, target.toFixed(2)]
+        );
+
+        // Override rows carry their commission_amount from write time and the
+        // finalize job only locks them, so unlike a direct row their money
+        // does not get recomputed later. Recompute it here off the reduced
+        // net subtotal, using the flat per-level rate stored on the row.
+        if (row.is_override && row.commission_rate_applied != null) {
+          const net = subtotal - target;
+          const amount = Math.round(net * Number(row.commission_rate_applied) * 100) / 100;
+          await client.query(
+            `UPDATE public.commissions SET commission_amount = $2 WHERE id = $1`,
+            [row.id, amount.toFixed(2)]
+          );
+        }
+
+        if (row.is_override) overrides += 1;
+        else direct += 1;
+        continue;
+      }
+
+      // Locked. Leave the row alone and carry the reversal forward. The
+      // reversal is in commission dollars because that is what was locked and
+      // paid against — there is no tier to recompute after the fact.
+      const locked = Number(row.commission_amount || 0);
+      const reversal = Math.round(locked * fraction * 100) / 100;
+      if (reversal <= 0) continue;
+
+      // Deliberately an upsert keyed on the original row: a redelivered
+      // webhook cannot double-reverse, and a partial refund that later becomes
+      // a full one tops the same adjustment up rather than adding a second.
+      // GREATEST means a smaller later fraction never gives money back by
+      // accident.
+      await client.query(
+        `INSERT INTO public.commission_adjustments (
+           partner_id, statement_period, amount, reason,
+           shopify_order_id, shopify_order_number,
+           source_commission_id, origin_period, notes
+         ) VALUES ($1, $2, $3, 'order_refund', $4, $5, $6, $7, $8)
+         ON CONFLICT (source_commission_id, reason)
+           WHERE source_commission_id IS NOT NULL
+         DO UPDATE SET
+           amount = LEAST(public.commission_adjustments.amount, EXCLUDED.amount),
+           notes = EXCLUDED.notes,
+           updated_at = NOW()`,
+        [
+          row.partner_id,
+          openPeriod,
+          (-reversal).toFixed(2),
+          shopifyOrderId,
+          row.shopify_order_number,
+          row.id,
+          row.statement_period,
+          `Refund on order #${row.shopify_order_number} (${row.statement_period}, already closed) at ${(
+            fraction * 100
+          ).toFixed(0)}%${row.is_override ? ` — level ${row.override_level} override` : ''}`,
+        ]
+      );
+      carriedForward += 1;
+    }
+
+    await client.query('COMMIT');
+    return {
+      direct,
+      overrides,
+      carried_forward: carriedForward,
+      skipped_locked: carriedForward,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // Best-effort logger for Square webhook events. Insert-on-receive so we

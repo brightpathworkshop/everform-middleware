@@ -43,17 +43,26 @@ async function finalizePeriodForPartner(partnerId, period) {
   if (!partner) throw new Error(`Partner ${partnerId} not found`);
 
   const { rows: commissions } = await pool.query(
-    `SELECT id, product_subtotal, is_override, statement_locked_at
+    `SELECT id, product_subtotal, net_subtotal, commission_rate_applied,
+            is_override, statement_locked_at
        FROM commissions
       WHERE partner_id = $1 AND statement_period = $2`,
     [partnerId, period]
   );
 
+  // Commission is computed on the NET subtotal — product_subtotal minus any
+  // refund_adjustment, maintained as a generated column. A refund against a
+  // period that is still open therefore lowers both the tier volume and the
+  // commission here, with no separate reversal arithmetic. (A refund against
+  // an already-locked period never reaches this job; it is carried forward as
+  // a commission_adjustments row instead.)
+  //
+  // net_subtotal is generated and so never null in practice; the coalesce is
+  // only belt-and-braces for rows written before the column existed.
+  const netOf = (r) => Number(r.net_subtotal ?? r.product_subtotal ?? 0);
+
   const directRows = commissions.filter((r) => !r.is_override);
-  const totalDirectSubtotal = directRows.reduce(
-    (s, r) => s + Number(r.product_subtotal || 0),
-    0
-  );
+  const totalDirectSubtotal = directRows.reduce((s, r) => s + netOf(r), 0);
   const effectiveRate = effectiveRateForSubtotal(partner, totalDirectSubtotal);
   const lockAt = firstOfNextMonthIso(period);
 
@@ -62,14 +71,28 @@ async function finalizePeriodForPartner(partnerId, period) {
   for (const r of commissions) {
     if (r.statement_locked_at) continue;
     if (r.is_override) {
-      await pool.query(
-        'UPDATE commissions SET statement_locked_at = $1 WHERE id = $2',
-        [lockAt, r.id]
-      );
+      // Overrides carry a flat per-level rate fixed at write time, so there is
+      // no tier to resolve — but recompute off the net subtotal anyway so a
+      // refund that landed while the period was open is reflected. With no
+      // refund this is the same number it already held.
+      if (r.commission_rate_applied != null) {
+        const amount =
+          Math.round(netOf(r) * Number(r.commission_rate_applied) * 100) / 100;
+        await pool.query(
+          `UPDATE commissions
+              SET commission_amount = $1, statement_locked_at = $2
+            WHERE id = $3`,
+          [amount, lockAt, r.id]
+        );
+      } else {
+        await pool.query(
+          'UPDATE commissions SET statement_locked_at = $1 WHERE id = $2',
+          [lockAt, r.id]
+        );
+      }
       lockedOverride += 1;
     } else {
-      const amount =
-        Math.round(Number(r.product_subtotal || 0) * effectiveRate * 100) / 100;
+      const amount = Math.round(netOf(r) * effectiveRate * 100) / 100;
       await pool.query(
         `UPDATE commissions
             SET commission_amount = $1, statement_locked_at = $2

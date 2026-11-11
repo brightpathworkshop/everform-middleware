@@ -6,6 +6,7 @@ const shopifyAuth = require('./routes/shopifyAuth');
 const shopifyWebhook = require('./routes/shopifyWebhook');
 const shopifyCustomerWebhook = require('./routes/shopifyCustomerWebhook');
 const shopifyFulfillmentWebhook = require('./routes/shopifyFulfillmentWebhook');
+const shopifyRefundWebhook = require('./routes/shopifyRefundWebhook');
 const squareWebhook = require('./routes/squareWebhook');
 const jobs = require('./routes/jobs');
 const pool = require('./db/pool');
@@ -32,6 +33,7 @@ app.use('/auth', shopifyAuth);
 app.use(shopifyWebhook);
 app.use(shopifyCustomerWebhook);
 app.use(shopifyFulfillmentWebhook);
+app.use(shopifyRefundWebhook);
 app.use(squareWebhook);
 
 // Admin-triggered jobs (reprocess stuck orders etc.). Auth via shared
@@ -105,6 +107,10 @@ app.listen(config.port, async () => {
       -- changing, so a second push is a second text to a real customer.
       -- NULL means "not pushed"; the claim is taken atomically.
       ALTER TABLE orders ADD COLUMN IF NOT EXISTS ghl_invoice_pushed_at TIMESTAMPTZ;
+      -- Product dollars refunded on this order so far. Shopify sends one
+      -- refunds/create event per refund, so a second partial refund has to
+      -- reverse against the cumulative total rather than only its own share.
+      ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_product_subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0;
       -- One row per tracking number we have pushed to GHL. The GHL workflow
       -- that sends the tracking iMessage triggers on the tracking-number
       -- field changing, so this is what stops a customer being texted twice

@@ -35,6 +35,12 @@ const migration = `
   -- second push is a second text to a real customer. NULL means "not
   -- pushed"; the claim is taken atomically.
   ALTER TABLE orders ADD COLUMN IF NOT EXISTS ghl_invoice_pushed_at TIMESTAMPTZ;
+  -- Product dollars refunded on this order so far. Shopify sends one
+  -- refunds/create event per refund, so a second partial refund has to reverse
+  -- against the cumulative total rather than only its own share — otherwise
+  -- two 50% refunds would each ask for 50% and the order would never reach
+  -- fully reversed.
+  ALTER TABLE orders ADD COLUMN IF NOT EXISTS refunded_product_subtotal NUMERIC(10, 2) NOT NULL DEFAULT 0;
 
   -- One row per tracking number we have pushed to GHL. The GHL workflow that
   -- sends the tracking iMessage triggers on the tracking-number field
