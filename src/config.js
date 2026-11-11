@@ -29,15 +29,15 @@ module.exports = {
       accountSetupUrl: 'JmSEHfP1wYYUtwiwWoNG',
     },
     // GHL merge-tag keys for the CRM fields written at payment time
-    // (replacing the Zapier "order paid → GHL" Zap). Env-overridable because
-    // these names are a guess until confirmed against /api/admin/ghl-fields:
-    // nothing triggers on them, so a wrong key leaves a field blank in GHL
-    // rather than dropping a customer message, and it can be corrected
-    // without a code deploy.
+    // (replacing the Zapier "order paid → GHL" Zap). These are the existing
+    // fields the Zap already wrote, confirmed from GHL, minus the "contact."
+    // merge-tag prefix. Still env-overridable so a rename in GHL doesn't need
+    // a code deploy; nothing triggers on these, so a wrong key leaves a field
+    // blank rather than dropping a customer message.
     crmFieldKeys: {
       lastOrderDate: process.env.GHL_KEY_LAST_ORDER_DATE || 'last_order_date',
-      orderCount: process.env.GHL_KEY_ORDER_COUNT || 'customer_order_count',
-      totalSpend: process.env.GHL_KEY_TOTAL_SPEND || 'customer_total_spend',
+      orderCount: process.env.GHL_KEY_ORDER_COUNT || 'qty_of_orders',
+      totalSpend: process.env.GHL_KEY_TOTAL_SPEND || 'total_spend',
     },
   },
 
