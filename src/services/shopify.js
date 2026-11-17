@@ -549,9 +549,22 @@ async function fetchRefundedProductSubtotal(shopifyOrderId) {
 // refund reconciliation does: the webhook is a trigger, and the order's
 // payment state is settled on Shopify's side a beat after it fires.
 //
-// `storeCredit` is reported separately so a caller can name the deduction
-// honestly. `covered` is the figure that matters for invoicing — it accounts
-// for anything already settled, whatever paid it.
+// `prepaid` — not `covered` — is the figure callers act on, and the
+// difference is the whole point. A zero outstanding balance does NOT mean
+// money arrived: marking a draft order as paid in Shopify writes a SALE on
+// the `manual` gateway and zeroes the balance, and that is routine here for
+// orders that still need a Square invoice. Order #1413 ($807.91) was settled
+// and never invoiced because an earlier version of this read `outstanding`
+// alone and believed it.
+//
+// So only gateways that consume something real — store credit, gift cards —
+// reduce what we invoice. Anything else, `manual` included, is somebody's
+// bookkeeping and is ignored, which leaves every other order behaving exactly
+// as it did before store credit existed.
+//
+// `covered` is kept for diagnostics: when it exceeds `prepaid`, Shopify
+// thinks the order is settled by means we deliberately don't credit, and that
+// is worth seeing in the log rather than silently reasoning about.
 async function fetchOrderAmountDue(shopifyOrderId) {
   const body = await shopifyGraphQL(
     `query OrderAmountDue($id: ID!) {
@@ -579,24 +592,31 @@ async function fetchOrderAmountDue(shopifyOrderId) {
   const total = money(order.currentTotalPriceSet?.shopMoney?.amount);
   const outstanding = money(order.totalOutstandingSet?.shopMoney?.amount);
 
-  // A store-credit payment lands as an AUTHORIZATION (or SALE, if captured
-  // immediately) on the shopify_store_credit gateway. Count both, and count
-  // PENDING alongside SUCCESS: Shopify has already deducted it from what the
-  // customer owes, which is the only thing we act on here.
-  let storeCredit = 0;
+  // A store-credit or gift-card payment lands as an AUTHORIZATION (or SALE,
+  // if captured immediately) on its own gateway. Count both kinds, and count
+  // PENDING alongside SUCCESS: Shopify has already taken it off what the
+  // customer owes. REFUND is excluded on purpose — order #1381 carries a
+  // REFUND on the store-credit gateway, and reading that as a payment would
+  // zero the invoice on every order that was ever refunded to credit.
+  const PREPAID_GATEWAYS = new Set(['shopify_store_credit', 'gift_card']);
+  const byGateway = { shopify_store_credit: 0, gift_card: 0 };
   for (const t of order.transactions || []) {
-    if (t.gateway !== 'shopify_store_credit') continue;
+    if (!PREPAID_GATEWAYS.has(t.gateway)) continue;
     if (t.kind !== 'AUTHORIZATION' && t.kind !== 'SALE') continue;
     if (t.status !== 'SUCCESS' && t.status !== 'PENDING') continue;
-    storeCredit += money(t.amountSet?.shopMoney?.amount);
+    byGateway[t.gateway] += money(t.amountSet?.shopMoney?.amount);
   }
-  storeCredit = money(storeCredit);
+  const storeCredit = money(byGateway.shopify_store_credit);
+  const giftCard = money(byGateway.gift_card);
 
   return {
     total,
     outstanding,
     covered: money(Math.max(0, total - outstanding)),
     storeCredit,
+    giftCard,
+    // Never more than the order is worth, whatever the transactions say.
+    prepaid: money(Math.min(total, storeCredit + giftCard)),
   };
 }
 

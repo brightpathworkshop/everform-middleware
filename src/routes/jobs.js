@@ -106,31 +106,32 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
     // reprocess rather than falling through — nobody is waiting on this
     // invoice automatically, and a human is already at the keyboard.
     const amountDue = await shopify.fetchOrderAmountDue(order.shopifyOrderId);
-    if (amountDue.outstanding <= 0) {
+    if (amountDue.prepaid >= amountDue.total - 0.005 && amountDue.prepaid > 0) {
       await pipeline.log({
         ...keys,
         category: 'shopify_api',
         eventName: 'reprocess.nothing_outstanding',
         status: 'error',
-        errorMessage: `Order is already fully covered ($${amountDue.covered.toFixed(
+        errorMessage: `Order is already fully prepaid ($${amountDue.prepaid.toFixed(
           2
         )}) — there is nothing to invoice.`,
       });
       return res.status(400).json({
         ok: false,
-        error: `Order is fully covered ($${amountDue.covered.toFixed(
+        error: `Order is fully prepaid ($${amountDue.prepaid.toFixed(
           2
-        )} already paid); there is nothing left to invoice`,
+        )} in store credit or gift card); there is nothing left to invoice`,
       });
     }
-    if (amountDue.covered > 0) {
+    if (amountDue.prepaid > 0) {
       await pipeline.log({
         ...keys,
         category: 'shopify_api',
         eventName: 'order.partially_prepaid',
         message:
-          `$${amountDue.covered.toFixed(2)} of $${amountDue.total.toFixed(2)} already covered ` +
-          `(store credit $${amountDue.storeCredit.toFixed(2)}) — $${amountDue.outstanding.toFixed(2)} to invoice`,
+          `$${amountDue.prepaid.toFixed(2)} of $${amountDue.total.toFixed(2)} prepaid ` +
+          `(store credit $${amountDue.storeCredit.toFixed(2)}, gift card $${amountDue.giftCard.toFixed(2)}) — ` +
+          `$${(amountDue.total - amountDue.prepaid).toFixed(2)} to invoice`,
         payload: amountDue,
       });
     }
@@ -164,11 +165,11 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
           shopifyOrderNumber: order.shopifyOrderNumber,
           subtotal: order.subtotal,
           shipping: order.shipping,
-          creditApplied: amountDue.covered,
+          creditApplied: amountDue.prepaid,
           creditLabel:
-            amountDue.storeCredit >= amountDue.covered - 0.01
-              ? 'Store credit applied'
-              : 'Already paid',
+            amountDue.giftCard > amountDue.storeCredit
+              ? 'Gift card applied'
+              : 'Store credit applied',
         })
     );
 

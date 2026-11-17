@@ -134,14 +134,30 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
     let amountDue = null;
     try {
       amountDue = await shopify.fetchOrderAmountDue(order.shopifyOrderId);
-      if (amountDue.covered > 0) {
+      if (amountDue.prepaid > 0) {
         await pipeline.log({
           ...keys,
           category: 'shopify_api',
           eventName: 'order.partially_prepaid',
           message:
-            `$${amountDue.covered.toFixed(2)} of $${amountDue.total.toFixed(2)} already covered ` +
-            `(store credit $${amountDue.storeCredit.toFixed(2)}) — $${amountDue.outstanding.toFixed(2)} to invoice`,
+            `$${amountDue.prepaid.toFixed(2)} of $${amountDue.total.toFixed(2)} prepaid ` +
+            `(store credit $${amountDue.storeCredit.toFixed(2)}, gift card $${amountDue.giftCard.toFixed(2)}) — ` +
+            `$${(amountDue.total - amountDue.prepaid).toFixed(2)} to invoice`,
+          payload: amountDue,
+        });
+      } else if (amountDue.covered > 0) {
+        // Shopify says this order is settled, but not by anything we treat as
+        // prepayment — a draft order marked paid by hand, most likely. That
+        // is bookkeeping, not money we can see, so it does not reduce the
+        // invoice. Logged so the asymmetry is visible rather than silent.
+        await pipeline.log({
+          ...keys,
+          category: 'shopify_api',
+          eventName: 'order.settled_outside_prepayment',
+          status: 'info',
+          message:
+            `Shopify reports $${amountDue.covered.toFixed(2)} of $${amountDue.total.toFixed(2)} settled ` +
+            `with no store credit or gift card — invoicing the full amount`,
           payload: amountDue,
         });
       }
@@ -164,13 +180,19 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
     }
 
     // 4c. Nothing left to collect. The customer covered the whole order at
-    // checkout, so there is no invoice to raise — Square rejects zero-amount
-    // invoices, and there is no payment link worth texting someone who
-    // already paid. But the order IS paid, and everything that normally
-    // follows a payment has to happen anyway: the partner earns their
-    // commission, the stock comes off the shelf, the CRM gets refreshed.
-    // No Square payment webhook will ever arrive to do it, so settle here.
-    if (amountDue && amountDue.outstanding <= 0) {
+    // checkout with store credit or a gift card, so there is no invoice to
+    // raise — Square rejects zero-amount invoices, and there is no payment
+    // link worth texting someone who already paid. But the order IS paid, and
+    // everything that normally follows a payment has to happen anyway: the
+    // partner earns their commission, the stock comes off the shelf, the CRM
+    // gets refreshed. No Square payment webhook will ever arrive to do it, so
+    // settle here.
+    //
+    // Both conditions are required. `prepaid > 0` is what distinguishes a
+    // customer who actually spent a balance from a draft order somebody
+    // marked as paid — which also reports nothing outstanding, and which
+    // still needs its invoice.
+    if (amountDue && amountDue.prepaid > 0 && amountDue.outstanding <= 0) {
       const orderRow = await db.orders.findByShopifyOrderId(order.shopifyOrderId);
       await pipeline.log({
         ...keys,
@@ -178,7 +200,7 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
         category: 'square_api',
         eventName: 'square.invoice_skipped_prepaid',
         status: 'skipped',
-        message: `Order fully covered ($${amountDue.covered.toFixed(2)}) — no invoice raised`,
+        message: `Order fully prepaid ($${amountDue.prepaid.toFixed(2)}) — no invoice raised`,
         payload: amountDue,
       });
       if (!orderRow) {
@@ -197,9 +219,11 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
         keys: { ...keys, orderId: orderRow.id },
         paymentId: `store_credit:${order.shopifyOrderId}`,
         source: 'store_credit',
-        shopifyNote: `Paid in full at checkout — $${amountDue.covered.toFixed(
+        shopifyNote: `Paid in full at checkout — $${amountDue.prepaid.toFixed(
           2
-        )} covered (store credit $${amountDue.storeCredit.toFixed(2)}). No Square invoice raised.`,
+        )} prepaid (store credit $${amountDue.storeCredit.toFixed(
+          2
+        )}, gift card $${amountDue.giftCard.toFixed(2)}). No Square invoice raised.`,
       });
       return;
     }
@@ -241,17 +265,13 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
           shopifyOrderNumber: order.shopifyOrderNumber,
           subtotal: order.subtotal,
           shipping: order.shipping,
-          // Deduct what Shopify already collected. The line items still show
+          // Deduct only what was genuinely prepaid. The line items still show
           // the real price of the goods; the deduction is stated separately.
-          creditApplied: amountDue?.covered || 0,
-          // Only call it store credit when that is what it was. A covered
-          // amount with no matching credit transaction came from somewhere
-          // else — a gift card, or a payment taken by hand — and the invoice
-          // should not claim otherwise.
+          creditApplied: amountDue?.prepaid || 0,
           creditLabel:
-            amountDue && amountDue.storeCredit >= amountDue.covered - 0.01
-              ? 'Store credit applied'
-              : 'Already paid',
+            amountDue && amountDue.giftCard > amountDue.storeCredit
+              ? 'Gift card applied'
+              : 'Store credit applied',
         })
     );
 
