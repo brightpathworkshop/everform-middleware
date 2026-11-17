@@ -4,88 +4,9 @@ const shopify = require('../services/shopify');
 const db = require('../db/queries');
 const { alertMerchant } = require('../services/alerts');
 const pipeline = require('../services/pipelineLog');
-const inventory = require('../services/inventory');
-const inventorySync = require('../services/inventorySync');
-const ghlSync = require('../services/ghlSync');
-const config = require('../config');
+const orderSettlement = require('../services/orderSettlement');
 
 const router = express.Router();
-
-// Refresh a customer's CRM fields in GHL after payment. Replaces the Zapier
-// Zap that watched Shopify for paid orders and wrote a long list of fields
-// back to the contact.
-//
-// Deliberately a thin subset of what that Zap wrote: last order number and
-// date, lifetime order count, lifetime spend. The address fields it copied
-// are already set by the contact upsert, and the per-line-item order history
-// it maintained was the most fragile part of the Zap for the least use.
-//
-// Runs at PAYMENT, not order creation, because Shopify's numberOfOrders and
-// amountSpent only count what Shopify considers paid — and our orders stay
-// unpaid in Shopify until the Square invoice clears. Called immediately after
-// markOrderAsPaid, both figures include the order that just paid.
-//
-// Nothing in GHL triggers on these fields, so this is quiet by design: it
-// logs a failure and moves on rather than alerting. No customer is waiting on
-// it, and the next order the customer places refreshes the numbers anyway.
-async function syncCustomerCrmFields({ order, keys }) {
-  try {
-    const snap = await shopify.fetchOrderContactSnapshot(order.shopify_order_id);
-    if (!snap || !snap.email) {
-      await pipeline.log({
-        ...keys,
-        category: 'ghl_api',
-        eventName: 'ghl.crm_sync_no_contact',
-        status: 'skipped',
-        message: 'No email on the Shopify order — nothing to sync',
-      });
-      return;
-    }
-
-    const k = config.ghl.crmFieldKeys;
-    const result = await ghlSync.syncContact({
-      name: 'ghl.crm_sync',
-      contact: {
-        email: snap.email,
-        phone: snap.phone,
-        firstName: snap.firstName,
-        lastName: snap.lastName,
-        zip: snap.zip,
-        tags: ghlSync.consentTags(snap.smsConsentState),
-      },
-      // Plain fields, not trigger fields — these ride along with the upsert
-      // in a single request.
-      fields: {
-        [k.lastOrderDate]: snap.orderDateLocal,
-        [k.orderCount]: snap.orderCount,
-        [k.totalSpend]: snap.totalSpend,
-      },
-    });
-    await pipeline.log({
-      ...keys,
-      customerEmail: snap.email,
-      category: 'ghl_api',
-      eventName: 'ghl.crm_synced',
-      message: `CRM fields refreshed on GHL contact ${result.contact_id} · ${snap.orderCount} orders · $${snap.totalSpend}`,
-      payload: {
-        contact_id: result.contact_id,
-        unresolved_keys: result.unresolved_keys,
-      },
-    });
-  } catch (err) {
-    console.error(
-      `[Square Webhook] Order #${order.shopify_order_number} GHL CRM sync failed:`,
-      err.message
-    );
-    await pipeline.log({
-      ...keys,
-      category: 'ghl_api',
-      eventName: 'ghl.crm_sync_failed',
-      status: 'error',
-      errorMessage: err.message,
-    });
-  }
-}
 
 router.post('/webhooks/square', async (req, res) => {
   // 1. Verify webhook signature against every active Square account. The
@@ -189,80 +110,15 @@ router.post('/webhooks/square', async (req, res) => {
         return;
       }
 
-      const paymentId = squareInvoiceId;
-      await db.orders.updatePayment(order.shopify_order_id, paymentId);
-      await pipeline.log({
-        ...orderKeys,
-        category: 'db',
-        eventName: 'orders.marked_paid',
-        message: 'orders.status → paid',
+      // Everything that follows from an order being paid — status, commission,
+      // stock, Shopify, CRM — lives in orderSettlement, because a Square
+      // payment is no longer the only way an order can settle. See that module.
+      await orderSettlement.settleOrder({
+        order,
+        keys: orderKeys,
+        paymentId: squareInvoiceId,
+        source: 'square_payment',
       });
-
-      // Write commission row if this order was attributed to a partner referral.
-      if (order.referral_id) {
-        try {
-          const commission = await db.commissions.createForPaidOrder({ orderRow: order });
-          if (commission) {
-            console.log(
-              `[Square Webhook] Order #${order.shopify_order_number} commission row written (referral ${order.referral_id}, subtotal $${order.product_subtotal})`
-            );
-            await pipeline.log({
-              ...orderKeys,
-              category: 'commission',
-              eventName: 'commission.direct_written',
-              message: `Direct commission row written · subtotal $${order.product_subtotal}`,
-              payload: { referral_id: order.referral_id },
-            });
-          } else {
-            await pipeline.log({
-              ...orderKeys,
-              category: 'commission',
-              eventName: 'commission.already_exists',
-              status: 'skipped',
-              message: 'Commission row already exists — no reprocess',
-            });
-          }
-        } catch (err) {
-          console.error(
-            `[Square Webhook] Order #${order.shopify_order_number} commission write failed:`,
-            err.message
-          );
-          await pipeline.log({
-            ...orderKeys,
-            category: 'commission',
-            eventName: 'commission.write_failed',
-            status: 'error',
-            errorMessage: err.message,
-          });
-          alertMerchant(
-            'Commission write failed',
-            `Order #${order.shopify_order_number} (referral ${order.referral_id}) paid but commission row not written: ${err.message}`
-          );
-        }
-      }
-
-      // Deduct stock for the paid order. Never throws; a failure here is
-      // logged and alerted but cannot hold up the rest of the payment flow.
-      await inventory.consumeForPaidOrder({ order, keys: orderKeys });
-      // Then bring every Shopify listing that shares those vials into line.
-      await inventorySync.syncQuietly({ reason: 'order_paid', keys: orderKeys });
-
-      try {
-        await pipeline.measure(
-          { ...orderKeys, category: 'shopify_api', eventName: 'shopify.order_mark_as_paid' },
-          () => shopify.markOrderAsPaid(order.shopify_order_id, { squareInvoiceId })
-        );
-        console.log(`[Square Webhook] Order #${order.shopify_order_number} marked as paid in Shopify`);
-      } catch (err) {
-        alertMerchant(
-          'Shopify update failed after payment',
-          `Order #${order.shopify_order_number} invoice ${squareInvoiceId} paid but Shopify not updated after retries: ${err.message}`
-        );
-      }
-
-      // Refresh the customer's CRM fields in GHL, now that Shopify counts
-      // this order as paid. Never throws.
-      await syncCustomerCrmFields({ order, keys: orderKeys });
 
       await db.squareWebhookEvents.markProcessed(logId, { processedOk: true });
     } else if (event.type === 'invoice.refunded') {

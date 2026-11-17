@@ -16,6 +16,9 @@ const CONTACT_API_VERSION = '2026-10';
 // Version for fetchRefundedProductSubtotal. Pinned, and verified by running
 // the query against the live store — not against a schema tool's default.
 const REFUND_API_VERSION = '2026-10';
+// Version for fetchOrderAmountDue. Same rule: verified by running the query
+// against the live store (order #1412, which carries a store-credit payment).
+const CREDIT_API_VERSION = '2026-10';
 // Business timezone, for filing an order under the right calendar date.
 const ORDER_DATE_TIMEZONE = process.env.ORDER_DATE_TIMEZONE || 'America/Los_Angeles';
 
@@ -84,7 +87,11 @@ async function shopifyGraphQL(query, variables = {}, { apiVersion } = {}) {
 
 // --- Mark Order as Paid ---
 
-async function markOrderAsPaid(shopifyOrderId, { squareInvoiceId, squarePaymentId }) {
+// `note` overrides the order note this writes. Needed because not every paid
+// order was paid through Square any more: an order covered entirely by store
+// credit never has an invoice or a payment id, and the default wording would
+// claim a Square payment that never existed.
+async function markOrderAsPaid(shopifyOrderId, { squareInvoiceId, squarePaymentId, note }) {
   const gid = `gid://shopify/Order/${shopifyOrderId}`;
 
   const result = await shopifyGraphQL(
@@ -105,10 +112,12 @@ async function markOrderAsPaid(shopifyOrderId, { squareInvoiceId, squarePaymentI
   console.log(`[Shopify] Marked order ${shopifyOrderId} (${order.name}) as paid`);
 
   // Add note to the order
-  const note = squareInvoiceId
-    ? `Payment received via Square invoice #${squareInvoiceId}`
-    : `Payment received via Square auto-charge #${squarePaymentId}`;
-  await addOrderNote(shopifyOrderId, note);
+  const orderNote =
+    note ||
+    (squareInvoiceId
+      ? `Payment received via Square invoice #${squareInvoiceId}`
+      : `Payment received via Square auto-charge #${squarePaymentId}`);
+  await addOrderNote(shopifyOrderId, orderNote);
 
   return order;
 }
@@ -524,10 +533,78 @@ async function fetchRefundedProductSubtotal(shopifyOrderId) {
   return Math.round(total * 100) / 100;
 }
 
+// --- Amount Actually Due ---
+
+// What the customer still owes, as Shopify sees it right now.
+//
+// The order payload's `total_price` is what the order is WORTH, not what is
+// left to collect. When a customer spends store credit at checkout, Shopify
+// records the credit as its own transaction and leaves only the remainder
+// outstanding — the order total never moves. Invoicing from `total_price`
+// therefore bills the customer a second time for everything the credit
+// already covered. Order #1412 went out for $115.48 when $108.00 of it had
+// been paid in credit and only $7.48 was actually due.
+//
+// Read live rather than from the webhook payload, for the same reason the
+// refund reconciliation does: the webhook is a trigger, and the order's
+// payment state is settled on Shopify's side a beat after it fires.
+//
+// `storeCredit` is reported separately so a caller can name the deduction
+// honestly. `covered` is the figure that matters for invoicing — it accounts
+// for anything already settled, whatever paid it.
+async function fetchOrderAmountDue(shopifyOrderId) {
+  const body = await shopifyGraphQL(
+    `query OrderAmountDue($id: ID!) {
+       order(id: $id) {
+         currentTotalPriceSet { shopMoney { amount } }
+         totalOutstandingSet { shopMoney { amount } }
+         transactions(first: 50) {
+           kind
+           status
+           gateway
+           amountSet { shopMoney { amount } }
+         }
+       }
+     }`,
+    { id: `gid://shopify/Order/${shopifyOrderId}` },
+    { apiVersion: CREDIT_API_VERSION }
+  );
+
+  const order = body?.data?.order;
+  if (!order) {
+    throw new Error(`Order ${shopifyOrderId} not found in Shopify`);
+  }
+
+  const money = (v) => Math.round(Number(v || 0) * 100) / 100;
+  const total = money(order.currentTotalPriceSet?.shopMoney?.amount);
+  const outstanding = money(order.totalOutstandingSet?.shopMoney?.amount);
+
+  // A store-credit payment lands as an AUTHORIZATION (or SALE, if captured
+  // immediately) on the shopify_store_credit gateway. Count both, and count
+  // PENDING alongside SUCCESS: Shopify has already deducted it from what the
+  // customer owes, which is the only thing we act on here.
+  let storeCredit = 0;
+  for (const t of order.transactions || []) {
+    if (t.gateway !== 'shopify_store_credit') continue;
+    if (t.kind !== 'AUTHORIZATION' && t.kind !== 'SALE') continue;
+    if (t.status !== 'SUCCESS' && t.status !== 'PENDING') continue;
+    storeCredit += money(t.amountSet?.shopMoney?.amount);
+  }
+  storeCredit = money(storeCredit);
+
+  return {
+    total,
+    outstanding,
+    covered: money(Math.max(0, total - outstanding)),
+    storeCredit,
+  };
+}
+
 module.exports = {
   fetchOrderById,
   fetchOrderContactSnapshot,
   fetchRefundedProductSubtotal,
+  fetchOrderAmountDue,
   listVariantInventory,
   setAvailableQuantities,
   markOrderAsPaid,

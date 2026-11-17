@@ -98,6 +98,43 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
       });
     }
 
+    // Deduct whatever the customer already paid at checkout, same as the
+    // orders webhook. This path matters more than that one, not less: it is
+    // what a merchant reaches for after an order was invoiced wrongly, so
+    // reissuing at the full amount would simply repeat the mistake it was
+    // opened to correct. Unlike the webhook, a failure here refuses the
+    // reprocess rather than falling through — nobody is waiting on this
+    // invoice automatically, and a human is already at the keyboard.
+    const amountDue = await shopify.fetchOrderAmountDue(order.shopifyOrderId);
+    if (amountDue.outstanding <= 0) {
+      await pipeline.log({
+        ...keys,
+        category: 'shopify_api',
+        eventName: 'reprocess.nothing_outstanding',
+        status: 'error',
+        errorMessage: `Order is already fully covered ($${amountDue.covered.toFixed(
+          2
+        )}) — there is nothing to invoice.`,
+      });
+      return res.status(400).json({
+        ok: false,
+        error: `Order is fully covered ($${amountDue.covered.toFixed(
+          2
+        )} already paid); there is nothing left to invoice`,
+      });
+    }
+    if (amountDue.covered > 0) {
+      await pipeline.log({
+        ...keys,
+        category: 'shopify_api',
+        eventName: 'order.partially_prepaid',
+        message:
+          `$${amountDue.covered.toFixed(2)} of $${amountDue.total.toFixed(2)} already covered ` +
+          `(store credit $${amountDue.storeCredit.toFixed(2)}) — $${amountDue.outstanding.toFixed(2)} to invoice`,
+        payload: amountDue,
+      });
+    }
+
     // Same flow as the shopify webhook route — findOrCreate customer,
     // then createAndSendInvoice. Both are instrumented with pipeline
     // events via services/square.js call sites, so the admin timeline
@@ -127,6 +164,11 @@ router.post('/jobs/reprocess-order', requireJobSecret, async (req, res) => {
           shopifyOrderNumber: order.shopifyOrderNumber,
           subtotal: order.subtotal,
           shipping: order.shipping,
+          creditApplied: amountDue.covered,
+          creditLabel:
+            amountDue.storeCredit >= amountDue.covered - 0.01
+              ? 'Store credit applied'
+              : 'Already paid',
         })
     );
 

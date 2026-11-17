@@ -74,7 +74,23 @@ async function findOrCreateCustomer({ email, firstName, lastName, phone }) {
 
 // --- Invoice Creation ---
 
-async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subtotal, shipping }) {
+// `creditApplied` is money Shopify already collected on this order — store
+// credit spent at checkout, most often. It becomes an order-level discount
+// rather than a smaller "Research Materials" line, so the invoice still shows
+// what was bought and what it cost, with the deduction stated plainly
+// underneath. Shrinking the product line instead would misreport the price of
+// the goods on the customer's own receipt.
+//
+// `creditLabel` names the deduction. The caller decides the wording, because
+// only it knows whether the covered amount really was store credit.
+async function createAndSendInvoice({
+  squareCustomerId,
+  shopifyOrderNumber,
+  subtotal,
+  shipping,
+  creditApplied = 0,
+  creditLabel = 'Store credit applied',
+}) {
   try {
     const { client, account } = await getClient();
     const lineItems = [
@@ -99,6 +115,29 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
       });
     }
 
+    // Never discount more than the invoice is worth: Square rejects a negative
+    // order, and a caller that over-reports the credit should produce a $0
+    // invoice rather than an exception. Callers are expected to skip the
+    // invoice entirely when nothing is left to collect — this is a floor, not
+    // the decision.
+    const lineTotal = Math.round((subtotal + (shipping > 0 ? shipping : 0)) * 100);
+    const discountCents = Math.min(
+      Math.max(0, Math.round(creditApplied * 100)),
+      lineTotal
+    );
+    const discounts =
+      discountCents > 0
+        ? [
+            {
+              uid: 'credit-applied',
+              name: creditLabel,
+              type: 'FIXED_AMOUNT',
+              amountMoney: { amount: BigInt(discountCents), currency: 'USD' },
+              scope: 'ORDER',
+            },
+          ]
+        : undefined;
+
     const orderIdempotencyKey = crypto.randomUUID();
     const orderResult = await withRetry(
       () =>
@@ -108,6 +147,7 @@ async function createAndSendInvoice({ squareCustomerId, shopifyOrderNumber, subt
             locationId: account.locationId,
             customerId: squareCustomerId,
             lineItems,
+            ...(discounts ? { discounts } : {}),
             metadata: { shopify_order_number: shopifyOrderNumber },
           },
         }),

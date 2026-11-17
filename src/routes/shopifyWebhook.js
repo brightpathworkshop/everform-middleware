@@ -6,6 +6,7 @@ const { alertMerchant } = require('../services/alerts');
 const pipeline = require('../services/pipelineLog');
 const inventorySync = require('../services/inventorySync');
 const ghlSync = require('../services/ghlSync');
+const orderSettlement = require('../services/orderSettlement');
 
 const router = express.Router();
 
@@ -116,6 +117,93 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
       return;
     }
 
+    // 4b. Work out what the customer actually still owes.
+    //
+    // `total_price` on the payload is what the order is worth, not what is
+    // left to collect. A customer who spends store credit at checkout has
+    // already paid part (or all) of it, and Shopify records that separately
+    // without touching the total. Invoicing the total bills them a second
+    // time for the covered portion — which is exactly what happened to order
+    // #1412: $115.48 invoiced when $108.00 had been paid in credit.
+    //
+    // If this lookup fails we deliberately fall through to invoicing the full
+    // amount, because the overwhelming majority of orders carry no credit and
+    // skipping the invoice on a Shopify blip would leave every customer
+    // without a payment link. The alert says the figure is unverified so an
+    // over-invoice can be caught by hand.
+    let amountDue = null;
+    try {
+      amountDue = await shopify.fetchOrderAmountDue(order.shopifyOrderId);
+      if (amountDue.covered > 0) {
+        await pipeline.log({
+          ...keys,
+          category: 'shopify_api',
+          eventName: 'order.partially_prepaid',
+          message:
+            `$${amountDue.covered.toFixed(2)} of $${amountDue.total.toFixed(2)} already covered ` +
+            `(store credit $${amountDue.storeCredit.toFixed(2)}) — $${amountDue.outstanding.toFixed(2)} to invoice`,
+          payload: amountDue,
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[Order #${order.shopifyOrderNumber}] Amount-due lookup failed:`,
+        err.message
+      );
+      await pipeline.log({
+        ...keys,
+        category: 'shopify_api',
+        eventName: 'order.amount_due_lookup_failed',
+        status: 'error',
+        errorMessage: err.message,
+      });
+      alertMerchant(
+        'Could not confirm amount due',
+        `Order #${order.shopifyOrderNumber}: Shopify would not say how much is outstanding, so the invoice was raised for the full $${order.total}. If the customer paid with store credit or a gift card, that invoice is overstated — check the order and reissue. Error: ${err.message}`
+      );
+    }
+
+    // 4c. Nothing left to collect. The customer covered the whole order at
+    // checkout, so there is no invoice to raise — Square rejects zero-amount
+    // invoices, and there is no payment link worth texting someone who
+    // already paid. But the order IS paid, and everything that normally
+    // follows a payment has to happen anyway: the partner earns their
+    // commission, the stock comes off the shelf, the CRM gets refreshed.
+    // No Square payment webhook will ever arrive to do it, so settle here.
+    if (amountDue && amountDue.outstanding <= 0) {
+      const orderRow = await db.orders.findByShopifyOrderId(order.shopifyOrderId);
+      await pipeline.log({
+        ...keys,
+        orderId: orderRow?.id || null,
+        category: 'square_api',
+        eventName: 'square.invoice_skipped_prepaid',
+        status: 'skipped',
+        message: `Order fully covered ($${amountDue.covered.toFixed(2)}) — no invoice raised`,
+        payload: amountDue,
+      });
+      if (!orderRow) {
+        // Can't happen in practice — the row was inserted a few lines up and
+        // the duplicate check already ran. Alert rather than settle nothing
+        // silently, because the partner's commission hangs off this.
+        alertMerchant(
+          'Prepaid order not settled',
+          `Order #${order.shopifyOrderNumber} was fully covered at checkout but its order row could not be read back, so it was not marked paid. Commission and stock have NOT been recorded.`
+        );
+        return;
+      }
+      // settleOrder runs the inventory sync itself, as part of settlement.
+      await orderSettlement.settleOrder({
+        order: orderRow,
+        keys: { ...keys, orderId: orderRow.id },
+        paymentId: `store_credit:${order.shopifyOrderId}`,
+        source: 'store_credit',
+        shopifyNote: `Paid in full at checkout — $${amountDue.covered.toFixed(
+          2
+        )} covered (store credit $${amountDue.storeCredit.toFixed(2)}). No Square invoice raised.`,
+      });
+      return;
+    }
+
     // 5. Find or create Square customer
     const { customer: squareCustomer, isNew } = await pipeline.measure(
       { ...keys, category: 'square_api', eventName: 'square.customer_find_or_create' },
@@ -153,6 +241,17 @@ router.post('/webhooks/shopify/orders', async (req, res) => {
           shopifyOrderNumber: order.shopifyOrderNumber,
           subtotal: order.subtotal,
           shipping: order.shipping,
+          // Deduct what Shopify already collected. The line items still show
+          // the real price of the goods; the deduction is stated separately.
+          creditApplied: amountDue?.covered || 0,
+          // Only call it store credit when that is what it was. A covered
+          // amount with no matching credit transaction came from somewhere
+          // else — a gift card, or a payment taken by hand — and the invoice
+          // should not claim otherwise.
+          creditLabel:
+            amountDue && amountDue.storeCredit >= amountDue.covered - 0.01
+              ? 'Store credit applied'
+              : 'Already paid',
         })
     );
 
