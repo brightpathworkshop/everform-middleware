@@ -33,6 +33,20 @@ const SYNC_PATH = '/api/internal/ghl-sync';
 // so it's handled here.
 const SEARCH_LAG_RETRY_MS = 1500;
 
+// The portal is a serverless deploy, so a request can arrive while there is no
+// warm instance to take it and simply fail to connect. retry.js's default
+// three attempts spans about three seconds, which is not enough: order #1412's
+// invoice push used all three inside five seconds and the customer never got
+// their payment link. Five attempts spans roughly fifteen.
+//
+// The cost of the extra attempts is that "fetch failed" doesn't prove the
+// portal didn't process the request — only that we never saw the answer — so
+// a retry can write the trigger fields twice and send a second text. That
+// risk already existed at three attempts; it is worth widening, because the
+// failure it prevents is a customer with no way to pay at all, and the
+// failure it risks is a customer told the same thing twice.
+const SYNC_MAX_ATTEMPTS = 5;
+
 function configured() {
   return Boolean(config.portal.baseUrl && config.portal.sharedSecret);
 }
@@ -93,11 +107,17 @@ async function syncContact({ contact, fields, triggerFields, name = 'ghl.sync' }
   };
 
   try {
-    return await withRetry(() => postSync(body), { name });
+    return await withRetry(() => postSync(body), {
+      name,
+      maxAttempts: SYNC_MAX_ATTEMPTS,
+    });
   } catch (err) {
     if (err.statusCode === 409) {
       await new Promise((r) => setTimeout(r, SEARCH_LAG_RETRY_MS));
-      return await withRetry(() => postSync(body), { name: `${name}.retry` });
+      return await withRetry(() => postSync(body), {
+        name: `${name}.retry`,
+        maxAttempts: SYNC_MAX_ATTEMPTS,
+      });
     }
     throw err;
   }
@@ -119,6 +139,20 @@ function warnIfUntextable({ phone, orderNumber, email, what }) {
 // Shopify reports SMS marketing consent as lowercase "subscribed" on REST
 // webhook payloads and uppercase "SUBSCRIBED" on GraphQL. Both reach this
 // code from different paths, so neither spelling is wrong — compare folded.
+// The portal reports a phone collision rather than failing the write: another
+// GHL contact already holds this number, so the phone was dropped and
+// everything else went through. Nothing is broken, but two contacts for one
+// person means half their history is on each, and only a human can merge
+// them — so say so once, where it happened.
+function warnIfPhoneConflict({ result, orderNumber, email }) {
+  const c = result?.phone_conflict;
+  if (!c) return;
+  alertMerchant(
+    'Duplicate GHL contact — phone not updated',
+    `Order #${orderNumber} (${email}): the phone number ${c.phone} already belongs to a different GHL contact (${c.other_contact_id}), so it was not written to this customer's contact. The order fields and the text did go out.\n\nThese are almost certainly two records for the same person — merge them in GHL so the next order doesn't split the same way.`
+  );
+}
+
 function consentTags(state) {
   return String(state || '').toLowerCase() === 'subscribed'
     ? ['sms-marketing-consent']
@@ -229,6 +263,11 @@ async function pushInvoiceUrl({ order, invoice, keys }) {
       orderNumber: order.shopifyOrderNumber,
       email: order.email,
       what: 'Invoice',
+    });
+    warnIfPhoneConflict({
+      result,
+      orderNumber: order.shopifyOrderNumber,
+      email: order.email,
     });
   } catch (err) {
     // Hand the claim back so a reprocess can retry — otherwise a transient
@@ -392,6 +431,7 @@ async function pushTracking({ shopifyOrderId, orderNumber, contact, fulfillment,
       email: contact.email,
       what: 'Tracking',
     });
+    warnIfPhoneConflict({ result, orderNumber, email: contact.email });
     if (fulfillment.extraTrackingNumbers?.length > 0) {
       alertMerchant(
         'Order shipped in multiple parcels',
